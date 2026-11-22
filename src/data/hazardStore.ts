@@ -16,6 +16,9 @@ import {
 } from "@/lib/db";
 import { isModerator } from "@/data/userStore";
 import { incidentRepository } from "@/lib/sqlite/incidentRepository";
+import { outboxRepository } from "@/lib/sqlite/outboxRepository";
+import { mqttClient } from "@/services/mqtt/MqttClient";
+import { ackManager } from "@/services/mqtt/MqttAcknowledgement";
 import { supabase } from "@/lib/supabase";
 import { calculateHaversineDistanceMeters } from "@/lib/incidents/deduplication";
 
@@ -396,90 +399,8 @@ export async function addHazard(item: Omit<Hazard, 'id' | 'time' | 'sample' | 'c
   hazards = [newReport, ...hazards.filter((h) => h.id !== newReport.id)];
   notify();
 
-  try {
-    const created = await createSupabaseHazard({
-      type: newReport.type,
-      description: newReport.description,
-      area: newReport.location || newReport.area || null,
-      severity: newReport.severity,
-      latitude: newReport.latitude ?? null,
-      longitude: newReport.longitude ?? null,
-      photo_url: newReport.photo_url ?? null,
-      reported_by: newReport.reportedBy,
-      reported_by_role: newReport.reportedByRole,
-      reporter_phone: newReport.reporterPhone ?? null,
-      status: newReport.status as ReportStatus,
-    });
-
-    if (created && created.id) {
-      // Smoothly update local ID to matching Supabase UUID
-      hazards = hazards.map((h) => (h.id === newReport.id ? { ...h, id: String(created.id) } : h));
-      notify();
-
-      // Trigger asynchronous AI verification in background
-      if (newReport.photo_url) {
-        setTimeout(() => {
-          import('@/lib/hazardVerification').then(({ verifyHazardWithNvidia }) => {
-            verifyHazardWithNvidia({
-              hazard_id: String(created.id),
-              photo_url: newReport.photo_url,
-              type: newReport.type,
-              description: newReport.description,
-            }).then((res) => {
-              if (res.result) {
-                const verifiedResult = res.result;
-                const isFake = (res.verdict || '').toLowerCase() === 'inconsistent';
-                hazards = hazards.map((h) =>
-                  h.id === String(created.id)
-                    ? {
-                        ...h,
-                        status: isFake ? ('rejected' as ReportStatus) : h.status,
-                        ai_verification_status: 'completed',
-                        ai_verification_verdict: res.verdict,
-                        ai_verification_result: verifiedResult,
-                        ai_verified_at: verifiedResult.verified_at,
-                      }
-                    : h
-                );
-                notify();
-
-                if (isFake) {
-                  // Automatically update database status to rejected so public feeds filter it out
-                  import('@/lib/supabase').then(async ({ supabase }) => {
-                    try {
-                      await supabase
-                        .from('hazards')
-                        .update({ status: 'rejected' })
-                        .eq('id', String(created.id));
-                    } catch {}
-                  });
-                }
-              }
-            }).catch(() => {});
-          });
-        }, 500);
-      }
-    }
-  } catch (error) {
-    console.warn("Supabase insert not synchronized immediately, queued safely offline:", (error as any)?.message || error);
-    await queueOfflineReport({
-      id: newReport.id,
-      type: newReport.type,
-      location: newReport.location,
-      area: newReport.area ?? null,
-      description: newReport.description,
-      severity: newReport.severity,
-      status: newReport.status as ReportStatus,
-      time: newReport.time,
-      latitude: newReport.latitude ?? null,
-      longitude: newReport.longitude ?? null,
-      photo_url: newReport.photo_url ?? null,
-      reported_by: newReport.reportedBy,
-      reported_by_role: newReport.reportedByRole,
-    });
-  }
-
-  // Ensure durable offline persistence in SQLite repository
+  // STAGE 1: LOCALLY_QUEUED in SQLite Outbox & Incident Repository
+  const outboxPriority = (newReport.severity === 'High') ? 'P1' : 'P2';
   await incidentRepository.saveIncidentLocally({
     id: newReport.id,
     type: newReport.type,
@@ -491,8 +412,150 @@ export async function addHazard(item: Omit<Hazard, 'id' | 'time' | 'sample' | 'c
     verificationStatus: 'unverified',
   }).catch(() => {});
 
-  hazards = [newReport, ...hazards];
-  notify();
+  await outboxRepository.enqueue(
+    'HAZARD_REPORTED',
+    newReport.id,
+    {
+      ...newReport,
+      latitude: newReport.latitude ?? null,
+      longitude: newReport.longitude ?? null,
+    },
+    `hazard_${newReport.id}`,
+    outboxPriority
+  ).catch(() => {});
+
+  // STAGE 2: Try publishing via MQTT Ingress
+  let mqttPublished = false;
+  try {
+    if (mqttClient.isConnected()) {
+      await outboxRepository.markPublishing(newReport.id);
+      const res = await mqttClient.publishHazardReport(
+        {
+          hazardId: newReport.id,
+          hazardType: newReport.type,
+          district: newReport.location || newReport.area || 'Uttarakhand Highway',
+          severity: newReport.severity as any,
+          status: newReport.status as any,
+          description: newReport.description,
+          latitude: newReport.latitude ?? null,
+          longitude: newReport.longitude ?? null,
+          hasPhoto: Boolean(newReport.photo_url),
+          photoUrl: newReport.photo_url ?? null,
+          reportedBy: newReport.reportedBy,
+          reportedByRole: newReport.reportedByRole,
+          reporterPhone: newReport.reporterPhone ?? null,
+          localTimestamp: newReport.created_at || now.toISOString(),
+        },
+        { correlationId: newReport.id }
+      );
+
+      mqttPublished = true;
+      await outboxRepository.markBrokerAcknowledged(newReport.id);
+
+      // Listen for STAGE 4 (DATABASE_PERSISTED) server ack
+      ackManager
+        .waitForConfirmation(res.eventId, 12000)
+        .then(async (ackRec) => {
+          await outboxRepository.markServerPersisted(newReport.id);
+          await outboxRepository.markSynced(newReport.id);
+          if (ackRec.hazardId && ackRec.hazardId !== newReport.id) {
+            hazards = hazards.map((h) =>
+              h.id === newReport.id ? { ...h, id: String(ackRec.hazardId) } : h
+            );
+            notify();
+          }
+        })
+        .catch(() => {});
+    }
+  } catch (mqttErr) {
+    console.warn('[hazardStore] MQTT ingress delivery notice, falling back to HTTPS:', (mqttErr as any)?.message || mqttErr);
+  }
+
+  // FALLBACK: If MQTT was not connected or failed, synchronize via Supabase REST (HTTPS)
+  if (!mqttPublished) {
+    try {
+      const created = await createSupabaseHazard({
+        type: newReport.type,
+        description: newReport.description,
+        area: newReport.location || newReport.area || null,
+        severity: newReport.severity,
+        latitude: newReport.latitude ?? null,
+        longitude: newReport.longitude ?? null,
+        photo_url: newReport.photo_url ?? null,
+        reported_by: newReport.reportedBy,
+        reported_by_role: newReport.reportedByRole,
+        reporter_phone: newReport.reporterPhone ?? null,
+        status: newReport.status as ReportStatus,
+      });
+
+      if (created && created.id) {
+        hazards = hazards.map((h) => (h.id === newReport.id ? { ...h, id: String(created.id) } : h));
+        notify();
+        await outboxRepository.markSynced(newReport.id).catch(() => {});
+      }
+    } catch (fallbackError) {
+      console.warn("Supabase insert not synchronized immediately, queued safely in offline queue:", (fallbackError as any)?.message || fallbackError);
+      await queueOfflineReport({
+        id: newReport.id,
+        type: newReport.type,
+        location: newReport.location,
+        area: newReport.area ?? null,
+        description: newReport.description,
+        severity: newReport.severity,
+        status: newReport.status as ReportStatus,
+        time: newReport.time,
+        latitude: newReport.latitude ?? null,
+        longitude: newReport.longitude ?? null,
+        photo_url: newReport.photo_url ?? null,
+        reported_by: newReport.reportedBy,
+        reported_by_role: newReport.reportedByRole,
+      });
+    }
+  }
+
+  // Asynchronous background AI Image verification if photo exists
+  if (newReport.photo_url) {
+    const activeHazardId = newReport.id;
+    setTimeout(() => {
+      import('@/lib/hazardVerification').then(({ verifyHazardWithNvidia }) => {
+        verifyHazardWithNvidia({
+          hazard_id: activeHazardId,
+          photo_url: newReport.photo_url,
+          type: newReport.type,
+          description: newReport.description,
+        }).then((res) => {
+          if (res.result) {
+            const verifiedResult = res.result;
+            const isFake = (res.verdict || '').toLowerCase() === 'inconsistent';
+            hazards = hazards.map((h) =>
+              h.id === activeHazardId
+                ? {
+                    ...h,
+                    status: isFake ? ('rejected' as ReportStatus) : h.status,
+                    ai_verification_status: 'completed',
+                    ai_verification_verdict: res.verdict,
+                    ai_verification_result: verifiedResult,
+                    ai_verified_at: verifiedResult.verified_at,
+                  }
+                : h
+            );
+            notify();
+
+            if (isFake) {
+              import('@/lib/supabase').then(async ({ supabase }) => {
+                try {
+                  await supabase
+                    .from('hazards')
+                    .update({ status: 'rejected' })
+                    .eq('id', activeHazardId);
+                } catch {}
+              });
+            }
+          }
+        }).catch(() => {});
+      });
+    }, 500);
+  }
 }
 
 export async function addRelayedHazard(item: Hazard): Promise<void> {
@@ -512,6 +575,15 @@ export async function updateHazardStatus(id: string, status: ReportStatus): Prom
     h.id === id ? { ...h, status, updated_at: new Date().toISOString() } : h
   );
   notify();
+
+  // Publish real-time status update over MQTT network
+  mqttClient.publishHazardUpdate(id, {
+    hazardId: id,
+    status,
+    updatedBy: 'Moderator',
+    updatedRole: 'moderator',
+    updatedAt: new Date().toISOString(),
+  }).catch(() => {});
 
   try {
     await updateSupabaseHazardStatus(id, status);
@@ -534,99 +606,198 @@ export async function corroborateHazard(id: string): Promise<number> {
   }
 
   notify();
+
+  // Publish corroboration delta over MQTT
+  mqttClient.publishHazardUpdate(id, {
+    hazardId: id,
+    status: target.status as any,
+    updatedBy: 'Community Peer',
+    updatedRole: 'resident',
+    corroborationCount: updatedCount,
+    updatedAt: new Date().toISOString(),
+  }).catch(() => {});
+
   return updatedCount;
 }
 
 let realtimeSubChannel: any = null;
+let mqttSubIds: string[] = [];
 
 export function initRealtimeHazardSubscription(
   onNewNearbyHazard?: (hazard: Hazard, distanceKm: number | null) => void,
   userCoords?: { latitude: number; longitude: number } | null
 ): () => void {
-  if (realtimeSubChannel) {
-    return () => {};
-  }
+  // 1. MQTT Real-Time Event Backbone
+  mqttClient.init().then(async () => {
+    try {
+      // Subscribe to public hazard events
+      const sub1 = await mqttClient.subscribeToHazardEvents((msg) => {
+        const payload = msg.payload;
+        if (!payload) return;
 
-  try {
-    realtimeSubChannel = supabase
-      .channel('hazards-live-stream')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'hazards' },
-        (payload) => {
-          if (payload.eventType === 'UPDATE' && payload.new) {
-            const updated = payload.new as any;
-            hazards = hazards.map((h) => {
-              if (h.id === String(updated.id)) {
-                return {
-                  ...h,
-                  status: (updated.status || h.status) as ReportStatus,
-                  corroborationCount: updated.corroboration_count ?? h.corroborationCount,
-                  updated_at: updated.updated_at || new Date().toISOString(),
-                };
-              }
-              return h;
-            });
-            notify();
-            return;
-          }
-
-          const raw = payload.new as any;
-          if (!raw) return;
-
-          const newHazard: Hazard = {
-            id: String(raw.id),
-            type: raw.type as HazardType,
-            location: raw.location || raw.area || raw.description || 'Reported Mountain Location',
-            area: raw.area || 'Uttarakhand Highway',
-            description: raw.description || '',
-            severity: (raw.severity ? raw.severity.charAt(0).toUpperCase() + raw.severity.slice(1).toLowerCase() : 'High') as Severity,
-            status: (raw.status || 'reported') as ReportStatus,
-            time: 'Just now',
-            sample: false,
-            latitude: raw.latitude ?? raw.lat ?? 30.5564,
-            longitude: raw.longitude ?? raw.lng ?? 79.5638,
-            photo_url: raw.photo_url ?? null,
-            reportedBy: raw.reported_by || 'Nearby Resident',
-            reportedByRole: raw.reported_by_role || 'resident',
-            corroborationCount: raw.corroboration_count ?? 1,
-            created_at: raw.created_at || new Date().toISOString(),
-            ai_verification_status: raw.ai_verification_status ?? 'pending',
-            ai_verification_verdict: raw.ai_verification_verdict ?? null,
-            ai_verification_result: raw.ai_verification_result ?? null,
-            ai_verified_at: raw.ai_verified_at ?? null,
-            ai_verification_model: raw.ai_verification_model ?? 'google/paligemma',
-            ai_verification_error_code: raw.ai_verification_error_code ?? null,
-            ai_verification_attempts: raw.ai_verification_attempts ?? 0,
-          };
-
-          if (!hazards.some((h) => h.id === newHazard.id)) {
-            hazards = [newHazard, ...hazards];
-            notify();
-
-            let distanceKm: number | null = null;
-            if (userCoords && newHazard.latitude && newHazard.longitude) {
-              const meters = calculateHaversineDistanceMeters(
-                userCoords.latitude,
-                userCoords.longitude,
-                newHazard.latitude,
-                newHazard.longitude
-              );
-              distanceKm = Math.round((meters / 1000) * 10) / 10;
-            }
-
-            if (onNewNearbyHazard) {
-              onNewNearbyHazard(newHazard, distanceKm);
-            }
-          }
+        if (payload.status === 'rejected' || payload.status === 'dismissed') {
+          hazards = hazards.filter((h) => h.id !== payload.hazardId);
+          notify();
+          return;
         }
-      )
-      .subscribe();
-  } catch (err) {
-    console.warn('Realtime subscription fallback:', err);
+
+        if (hazards.some((h) => h.id === payload.hazardId)) return;
+
+        const newHazard: Hazard = {
+          id: payload.hazardId,
+          type: (payload.hazardType || 'Other') as HazardType,
+          location: payload.district || 'Reported Mountain Location',
+          area: payload.district || 'Uttarakhand Highway',
+          description: payload.description || '',
+          severity: (payload.severity || 'Medium') as Severity,
+          status: (payload.status || 'reported') as ReportStatus,
+          time: 'Just now',
+          sample: false,
+          latitude: payload.latitude ?? null,
+          longitude: payload.longitude ?? null,
+          photo_url: payload.photoUrl ?? null,
+          reportedBy: payload.reportedBy || 'Nearby Resident',
+          reportedByRole: payload.reportedByRole || 'resident',
+          corroborationCount: 1,
+          created_at: payload.localTimestamp || new Date().toISOString(),
+        };
+
+        hazards = [newHazard, ...hazards];
+        notify();
+
+        let distanceKm: number | null = null;
+        if (userCoords && newHazard.latitude && newHazard.longitude) {
+          const meters = calculateHaversineDistanceMeters(
+            userCoords.latitude,
+            userCoords.longitude,
+            newHazard.latitude,
+            newHazard.longitude
+          );
+          distanceKm = Math.round((meters / 1000) * 10) / 10;
+        }
+
+        if (onNewNearbyHazard) {
+          onNewNearbyHazard(newHazard, distanceKm);
+        }
+      });
+      mqttSubIds.push(sub1);
+
+      // Subscribe to hazard updates (status changes, closure confirmations)
+      const sub2 = await mqttClient.subscribeToAllHazardUpdates((msg) => {
+        const payload = msg.payload;
+        if (!payload) return;
+
+        if (payload.status === 'rejected' || payload.status === 'dismissed') {
+          hazards = hazards.filter((h) => h.id !== payload.hazardId);
+          notify();
+          return;
+        }
+
+        hazards = hazards.map((h) =>
+          h.id === payload.hazardId
+            ? {
+                ...h,
+                status: (payload.status || h.status) as ReportStatus,
+                corroborationCount: payload.corroborationCount ?? h.corroborationCount,
+                updated_at: payload.updatedAt || new Date().toISOString(),
+              }
+            : h
+        );
+        notify();
+      });
+      mqttSubIds.push(sub2);
+    } catch (mqttSubErr) {
+      console.warn('[hazardStore] MQTT subscription notice (Supabase fallback active):', mqttSubErr);
+    }
+  }).catch(() => {});
+
+  // 2. Secondary Supabase real-time channel fallback
+  if (!realtimeSubChannel) {
+    try {
+      realtimeSubChannel = supabase
+        .channel('hazards-live-stream')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'hazards' },
+          (payload) => {
+            if (payload.eventType === 'UPDATE' && payload.new) {
+              const updated = payload.new as any;
+              hazards = hazards.map((h) => {
+                if (h.id === String(updated.id)) {
+                  return {
+                    ...h,
+                    status: (updated.status || h.status) as ReportStatus,
+                    corroborationCount: updated.corroboration_count ?? h.corroborationCount,
+                    updated_at: updated.updated_at || new Date().toISOString(),
+                  };
+                }
+                return h;
+              });
+              notify();
+              return;
+            }
+
+            const raw = payload.new as any;
+            if (!raw) return;
+
+            const newHazard: Hazard = {
+              id: String(raw.id),
+              type: raw.type as HazardType,
+              location: raw.location || raw.area || raw.description || 'Reported Mountain Location',
+              area: raw.area || 'Uttarakhand Highway',
+              description: raw.description || '',
+              severity: (raw.severity ? raw.severity.charAt(0).toUpperCase() + raw.severity.slice(1).toLowerCase() : 'High') as Severity,
+              status: (raw.status || 'reported') as ReportStatus,
+              time: 'Just now',
+              sample: false,
+              latitude: raw.latitude ?? raw.lat ?? 30.5564,
+              longitude: raw.longitude ?? raw.lng ?? 79.5638,
+              photo_url: raw.photo_url ?? null,
+              reportedBy: raw.reported_by || 'Nearby Resident',
+              reportedByRole: raw.reported_by_role || 'resident',
+              corroborationCount: raw.corroboration_count ?? 1,
+              created_at: raw.created_at || new Date().toISOString(),
+              ai_verification_status: raw.ai_verification_status ?? 'pending',
+              ai_verification_verdict: raw.ai_verification_verdict ?? null,
+              ai_verification_result: raw.ai_verification_result ?? null,
+              ai_verified_at: raw.ai_verified_at ?? null,
+              ai_verification_model: raw.ai_verification_model ?? 'google/paligemma',
+              ai_verification_error_code: raw.ai_verification_error_code ?? null,
+              ai_verification_attempts: raw.ai_verification_attempts ?? 0,
+            };
+
+            if (!hazards.some((h) => h.id === newHazard.id)) {
+              hazards = [newHazard, ...hazards];
+              notify();
+
+              let distanceKm: number | null = null;
+              if (userCoords && newHazard.latitude && newHazard.longitude) {
+                const meters = calculateHaversineDistanceMeters(
+                  userCoords.latitude,
+                  userCoords.longitude,
+                  newHazard.latitude,
+                  newHazard.longitude
+                );
+                distanceKm = Math.round((meters / 1000) * 10) / 10;
+              }
+
+              if (onNewNearbyHazard) {
+                onNewNearbyHazard(newHazard, distanceKm);
+              }
+            }
+          }
+        )
+        .subscribe();
+    } catch (err) {
+      console.warn('Realtime subscription fallback:', err);
+    }
   }
 
   return () => {
+    for (const subId of mqttSubIds) {
+      mqttClient.unsubscribe(subId);
+    }
+    mqttSubIds = [];
     if (realtimeSubChannel) {
       supabase.removeChannel(realtimeSubChannel);
       realtimeSubChannel = null;

@@ -3,7 +3,17 @@ export type OutboxStatus =
   | 'processing'
   | 'synced'
   | 'failed'
-  | 'needs_review';
+  | 'needs_review'
+  | 'queued'
+  | 'publishing'
+  | 'broker_acknowledged'
+  | 'server_received'
+  | 'server_persisted'
+  | 'failed_retryable'
+  | 'failed_permanent'
+  | 'expired';
+
+export type OutboxPriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
 
 export interface OutboxEvent {
   id: string;
@@ -17,6 +27,9 @@ export interface OutboxEvent {
   nextRetryAt?: string;
   idempotencyKey: string;
   lastError?: string;
+  priority?: OutboxPriority;
+  brokerAckAt?: string;
+  serverAckAt?: string;
 }
 
 export interface IncidentRecord {

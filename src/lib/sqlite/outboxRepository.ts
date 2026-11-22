@@ -1,6 +1,7 @@
 import { SafeStorage } from '../storageHelper';
-import { OutboxEvent } from './types';
+import { OutboxEvent, OutboxPriority } from './types';
 import {
+  compareOutboxEventsByPriority,
   computeFailedEventState,
   createOutboxEvent,
   isEventEligibleForSync,
@@ -19,9 +20,9 @@ export class OutboxRepository {
       if (raw) {
         const events: OutboxEvent[] = JSON.parse(raw);
         for (const ev of events) {
-          // Restart recovery: recover events left in 'processing' state when app killed
-          if (ev.status === 'processing') {
-            ev.status = 'pending';
+          // Restart recovery: recover events left in transient processing or publishing states
+          if (ev.status === 'processing' || ev.status === 'publishing') {
+            ev.status = 'queued';
           }
           this.inMemoryQueue.set(ev.id, ev);
         }
@@ -45,20 +46,21 @@ export class OutboxRepository {
     eventType: string,
     aggregateId: string,
     payload: Record<string, unknown>,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    priority: OutboxPriority = 'P2'
   ): Promise<OutboxEvent> {
     await this.ensureLoaded();
 
     // Check idempotency: avoid inserting identical event if already queued
     if (idempotencyKey) {
       for (const ev of this.inMemoryQueue.values()) {
-        if (ev.idempotencyKey === idempotencyKey && ev.status !== 'failed') {
+        if (ev.idempotencyKey === idempotencyKey && ev.status !== 'failed' && ev.status !== 'failed_permanent') {
           return ev;
         }
       }
     }
 
-    const event = createOutboxEvent(eventType, aggregateId, payload, idempotencyKey);
+    const event = createOutboxEvent(eventType, aggregateId, payload, idempotencyKey, priority);
     this.inMemoryQueue.set(event.id, event);
     await this.persist();
     return event;
@@ -72,7 +74,7 @@ export class OutboxRepository {
         eligible.push({ ...ev });
       }
     }
-    return eligible.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    return eligible.sort(compareOutboxEventsByPriority);
   }
 
   async getAll(): Promise<OutboxEvent[]> {
@@ -84,17 +86,55 @@ export class OutboxRepository {
     await this.ensureLoaded();
     let count = 0;
     for (const ev of this.inMemoryQueue.values()) {
-      if (ev.status === 'pending' || ev.status === 'processing') {
+      if (
+        ev.status === 'pending' ||
+        ev.status === 'queued' ||
+        ev.status === 'processing' ||
+        ev.status === 'publishing' ||
+        ev.status === 'broker_acknowledged'
+      ) {
         count++;
       }
     }
     return count;
   }
 
+  async markPublishing(eventId: string): Promise<void> {
+    await this.ensureLoaded();
+    const ev = this.inMemoryQueue.get(eventId);
+    if (ev) {
+      ev.status = 'publishing';
+      ev.updatedAt = new Date().toISOString();
+      await this.persist();
+    }
+  }
+
+  async markBrokerAcknowledged(eventId: string): Promise<void> {
+    await this.ensureLoaded();
+    const ev = this.inMemoryQueue.get(eventId);
+    if (ev) {
+      ev.status = 'broker_acknowledged';
+      ev.brokerAckAt = new Date().toISOString();
+      ev.updatedAt = new Date().toISOString();
+      await this.persist();
+    }
+  }
+
+  async markServerPersisted(eventId: string): Promise<void> {
+    await this.ensureLoaded();
+    const ev = this.inMemoryQueue.get(eventId);
+    if (ev) {
+      ev.status = 'server_persisted';
+      ev.serverAckAt = new Date().toISOString();
+      ev.updatedAt = new Date().toISOString();
+      await this.persist();
+    }
+  }
+
   async markProcessing(eventId: string): Promise<void> {
     await this.ensureLoaded();
     const ev = this.inMemoryQueue.get(eventId);
-    if (ev && ev.status === 'pending') {
+    if (ev && (ev.status === 'pending' || ev.status === 'queued')) {
       ev.status = 'processing';
       ev.updatedAt = new Date().toISOString();
       await this.persist();

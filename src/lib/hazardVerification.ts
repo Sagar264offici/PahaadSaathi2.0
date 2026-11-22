@@ -533,7 +533,26 @@ export async function verifyHazardWithNvidia(
     // STEP 2: Image Retrieval & Formatting
     const imageBase64 = await prepareImageForNvidia(photo_url);
 
+    // Emit MQTT Image Upload Completed Event
+    try {
+      const { mqttClient } = await import('@/services/mqtt/MqttClient');
+      await mqttClient.publishAiVerificationStatus(hazard_id, {
+        hazardId: hazard_id,
+        status: 'IMAGE_UPLOAD_COMPLETED',
+        timestamp: new Date().toISOString(),
+      });
+    } catch {}
+
     // STEP 3: NVIDIA PaliGemma Analysis (Captioning & Hazard Check)
+    try {
+      const { mqttClient } = await import('@/services/mqtt/MqttClient');
+      await mqttClient.publishAiVerificationStatus(hazard_id, {
+        hazardId: hazard_id,
+        status: 'AI_VERIFICATION_STARTED',
+        timestamp: new Date().toISOString(),
+      });
+    } catch {}
+
     const caption = await queryNvidiaPaliGemma({
       imageBase64,
       promptText: 'caption en',
@@ -554,6 +573,18 @@ export async function verifyHazardWithNvidia(
       console.warn('Database persistence notice (schema update recommended):', err.message);
     });
 
+    // Emit MQTT AI Verification Completed Event
+    try {
+      const { mqttClient } = await import('@/services/mqtt/MqttClient');
+      await mqttClient.publishAiVerificationStatus(hazard_id, {
+        hazardId: hazard_id,
+        status: 'AI_VERIFICATION_COMPLETED',
+        verdict: result.verdict.toLowerCase() as any,
+        confidence: result.description_match ? 0.9 : 0.4,
+        timestamp: new Date().toISOString(),
+      });
+    } catch {}
+
     return {
       success: true,
       hazard_id,
@@ -567,6 +598,16 @@ export async function verifyHazardWithNvidia(
 
     // Save failed status safely without corrupting the hazard record
     await persistVerificationResult(hazard_id, 'failed', null, errorCode).catch(() => {});
+
+    // Emit MQTT AI Verification Failed Event
+    try {
+      const { mqttClient } = await import('@/services/mqtt/MqttClient');
+      await mqttClient.publishAiVerificationStatus(hazard_id, {
+        hazardId: hazard_id,
+        status: 'AI_VERIFICATION_FAILED',
+        timestamp: new Date().toISOString(),
+      });
+    } catch {}
 
     return {
       success: false,

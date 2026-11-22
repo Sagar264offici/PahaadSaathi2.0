@@ -274,6 +274,19 @@ export default function DistrictControlRoomScreen() {
         await removeHazard(activeReport.id, { reason: verdictReason.trim() || 'Dismissed as fake' });
       }
 
+      // Publish real-time moderator verdict event over MQTT
+      try {
+        const { mqttClient } = await import('@/services/mqtt/MqttClient');
+        await mqttClient.publishHazardUpdate(activeReport.id, {
+          hazardId: activeReport.id,
+          status: verdictType === 'verified' ? 'verified' : 'rejected',
+          updatedBy: officerId || 'Authorized Moderator',
+          updatedRole: 'moderator',
+          reason: verdictReason.trim() || undefined,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {}
+
       // Log the verdict
       await supabase.from('verification_log').insert({
         hazard_id: activeReport.id,

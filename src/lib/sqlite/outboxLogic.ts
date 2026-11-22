@@ -1,8 +1,29 @@
-import { OutboxEvent, OutboxStatus } from './types';
+import { OutboxEvent, OutboxPriority, OutboxStatus } from './types';
 
 export const MAX_RETRY_LIMIT = 5;
 export const BASE_BACKOFF_MS = 2000;
 export const MAX_BACKOFF_MS = 60000;
+
+const PRIORITY_ORDER: Record<string, number> = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+  P4: 4,
+};
+
+/**
+ * Compares outbox events primarily by emergency priority (P0 > P1 > P2 > P3 > P4)
+ * and secondarily by creation timestamp.
+ */
+export function compareOutboxEventsByPriority(a: OutboxEvent, b: OutboxEvent): number {
+  const prioA = PRIORITY_ORDER[a.priority || 'P2'] ?? 2;
+  const prioB = PRIORITY_ORDER[b.priority || 'P2'] ?? 2;
+  if (prioA !== prioB) {
+    return prioA - prioB;
+  }
+  return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+}
 
 /**
  * Calculates exponential backoff with randomized jitter to prevent thundering herd.
@@ -24,13 +45,28 @@ export function calculateExponentialBackoff(
  * Checks whether an outbox event is eligible for synchronization right now.
  */
 export function isEventEligibleForSync(event: OutboxEvent, nowMs: number = Date.now()): boolean {
-  if (event.status === 'synced' || event.status === 'processing') {
+  if (
+    event.status === 'synced' ||
+    event.status === 'processing' ||
+    event.status === 'publishing' ||
+    event.status === 'server_persisted'
+  ) {
     return false;
   }
-  if (event.status === 'failed' || event.status === 'needs_review') {
+  if (
+    event.status === 'failed' ||
+    event.status === 'needs_review' ||
+    event.status === 'failed_permanent' ||
+    event.status === 'expired'
+  ) {
     return false;
   }
-  if (event.status === 'pending') {
+  if (
+    event.status === 'pending' ||
+    event.status === 'queued' ||
+    event.status === 'broker_acknowledged' ||
+    event.status === 'failed_retryable'
+  ) {
     if (!event.nextRetryAt) {
       return true;
     }
@@ -81,7 +117,9 @@ export function createOutboxEvent(
   eventType: string,
   aggregateId: string,
   payload: Record<string, unknown>,
-  customIdempotencyKey?: string
+  customIdempotencyKey?: string,
+  priority: OutboxPriority = 'P2',
+  status: OutboxStatus = 'pending'
 ): OutboxEvent {
   const now = new Date().toISOString();
   const id = `ev_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -95,8 +133,9 @@ export function createOutboxEvent(
     payload,
     createdAt: now,
     updatedAt: now,
-    status: 'pending',
+    status,
     retryCount: 0,
     idempotencyKey,
+    priority,
   };
 }
