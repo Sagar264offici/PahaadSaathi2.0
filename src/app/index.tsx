@@ -94,6 +94,12 @@ export default function HomeScreen() {
   const notifSlideAnim = useRef(new Animated.Value(-120)).current;
 
   const triggerProximityNotification = useCallback((hazard: Hazard, distanceKm: number) => {
+    // Strict 50 km geographical radius:
+    // If the person is farther than 50 km, suppress notification completely.
+    if (distanceKm > 50) {
+      return;
+    }
+
     setActiveNotification({ hazard, distanceKm });
     try {
       Vibration.vibrate([0, 250, 100, 250]);
@@ -161,9 +167,21 @@ export default function HomeScreen() {
 
     // Connect to Supabase Realtime channel for incoming uploads from other users
     const unsubRealtime = initRealtimeHazardSubscription((incomingHazard, dist) => {
-      const distance = dist ?? 2.4;
-      // If within 25 km range, trigger notification immediately!
-      if (distance <= 25) {
+      let distance = dist;
+      if (typeof distance !== 'number' && incomingHazard.latitude && incomingHazard.longitude && userLocation) {
+        const meters = calculateHaversineDistanceMeters(
+          userLocation.latitude,
+          userLocation.longitude,
+          incomingHazard.latitude,
+          incomingHazard.longitude
+        );
+        distance = Math.round((meters / 1000) * 10) / 10;
+      }
+      // If person is outer than 50 km, they do NOT receive the notification
+      if (typeof distance === 'number') {
+        if (distance > 50) {
+          return;
+        }
         triggerProximityNotification(incomingHazard, distance);
       }
     }, userLocation);
