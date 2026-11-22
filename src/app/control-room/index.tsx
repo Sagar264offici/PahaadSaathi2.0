@@ -266,8 +266,13 @@ export default function DistrictControlRoomScreen() {
       // Update hazard status
       await supabase
         .from('hazards')
-        .update({ status: verdictType === 'verified' ? 'verified' : 'dismissed' })
+        .update({ status: verdictType === 'verified' ? 'verified' : 'rejected' })
         .eq('id', activeReport.id);
+
+      if (verdictType === 'dismissed') {
+        const { removeHazard } = await import('@/data/hazardStore');
+        await removeHazard(activeReport.id, { reason: verdictReason.trim() || 'Dismissed as fake' });
+      }
 
       // Log the verdict
       await supabase.from('verification_log').insert({

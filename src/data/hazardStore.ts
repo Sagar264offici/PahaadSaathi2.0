@@ -43,7 +43,8 @@ export type ReportStatus =
   | "corroborated"
   | "confirmed_closure"
   | "resolved"
-  | "rejected";
+  | "rejected"
+  | "dismissed";
 
 export type Hazard = {
   id: string;
@@ -187,8 +188,47 @@ function ensureDbInit(): void {
   }
 }
 
-export function getHazards(): Hazard[] {
+export function getHazards(options?: { includeFake?: boolean }): Hazard[] {
+  if (options?.includeFake) return hazards;
+  return hazards.filter(
+    (h) =>
+      h.status !== 'rejected' &&
+      h.status !== 'dismissed' &&
+      h.ai_verification_verdict?.toLowerCase() !== 'inconsistent'
+  );
+}
+
+export function getAllHazards(): Hazard[] {
   return hazards;
+}
+
+export async function removeHazard(
+  id: string,
+  options?: { permanently?: boolean; reason?: string }
+): Promise<void> {
+  // 1. Immediately drop from in-memory state so feeds update instantly
+  hazards = hazards.filter((h) => h.id !== id);
+  notify();
+
+  // 2. Remove / update status in Supabase
+  try {
+    const { supabase } = await import('@/lib/supabase');
+    if (options?.permanently) {
+      await supabase.from('hazards').delete().eq('id', id);
+    } else {
+      await supabase
+        .from('hazards')
+        .update({
+          status: 'rejected',
+          ai_verification_status: 'completed',
+          ai_verification_verdict: 'inconsistent',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id);
+    }
+  } catch (err) {
+    console.warn('Supabase removeHazard notice:', err);
+  }
 }
 
 export function getHazard(id: string): Hazard | undefined {
@@ -388,10 +428,12 @@ export async function addHazard(item: Omit<Hazard, 'id' | 'time' | 'sample' | 'c
             }).then((res) => {
               if (res.result) {
                 const verifiedResult = res.result;
+                const isFake = (res.verdict || '').toLowerCase() === 'inconsistent';
                 hazards = hazards.map((h) =>
                   h.id === String(created.id)
                     ? {
                         ...h,
+                        status: isFake ? ('rejected' as ReportStatus) : h.status,
                         ai_verification_status: 'completed',
                         ai_verification_verdict: res.verdict,
                         ai_verification_result: verifiedResult,
@@ -400,6 +442,18 @@ export async function addHazard(item: Omit<Hazard, 'id' | 'time' | 'sample' | 'c
                     : h
                 );
                 notify();
+
+                if (isFake) {
+                  // Automatically update database status to rejected so public feeds filter it out
+                  import('@/lib/supabase').then(async ({ supabase }) => {
+                    try {
+                      await supabase
+                        .from('hazards')
+                        .update({ status: 'rejected' })
+                        .eq('id', String(created.id));
+                    } catch {}
+                  });
+                }
               }
             }).catch(() => {});
           });
@@ -655,10 +709,12 @@ export async function verifyHazardById(
 
     if (res.result) {
       const verifiedResult = res.result;
+      const isFake = (res.verdict || '').toLowerCase() === 'inconsistent';
       hazards = hazards.map((h) =>
         h.id === id
           ? {
               ...h,
+              status: isFake ? ('rejected' as ReportStatus) : h.status,
               ai_verification_status: 'completed',
               ai_verification_verdict: res.verdict,
               ai_verification_result: verifiedResult,
@@ -667,6 +723,18 @@ export async function verifyHazardById(
           : h
       );
       notify();
+
+      if (isFake) {
+        import('@/lib/supabase').then(async ({ supabase }) => {
+          try {
+            await supabase
+              .from('hazards')
+              .update({ status: 'rejected' })
+              .eq('id', id);
+          } catch {}
+        });
+      }
+
       return verifiedResult;
     } else {
       hazards = hazards.map((h) =>

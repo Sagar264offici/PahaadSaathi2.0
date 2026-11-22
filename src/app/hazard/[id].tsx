@@ -19,7 +19,9 @@ import {
   subscribe,
   updateHazardStatus,
   verifyHazardById,
+  removeHazard,
 } from "@/data/hazardStore";
+import { Trash2 } from "lucide-react-native";
 import { isModerator } from "@/data/userStore";
 import { HazardVerificationStatus } from "@/components/HazardVerificationStatus";
 import { useTheme } from "@/hooks/useTheme";
@@ -179,6 +181,33 @@ export default function HazardDetails() {
     });
   }
 
+  async function handleRemoveFakeReport() {
+    if (!hazard) return;
+    Alert.alert(
+      "Remove Fake Report?",
+      "Are you sure this report is fake or misleading? It will be removed immediately from public feeds, alerts, and map routing.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove Report",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await removeHazard(hazard.id, { permanently: true });
+              Alert.alert(
+                "Report Removed",
+                "The fake incident report has been removed and purged."
+              );
+              router.replace('/');
+            } catch (err) {
+              Alert.alert("Error", "Could not remove report. Please try again.");
+            }
+          },
+        },
+      ]
+    );
+  }
+
   if (!hazard) {
     return (
       <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]}>
@@ -284,6 +313,25 @@ export default function HazardDetails() {
         <View style={styles.actionSection}>
           <Pressable style={[styles.primaryBtn, { backgroundColor: theme.primary }]} onPress={resolveReport}>
             <Text style={[styles.primaryBtnText, { color: '#FFFFFF' }]}>✓ Confirm Road Clearance</Text>
+          </Pressable>
+
+          {/* Remove / Reject Fake Report Button */}
+          <Pressable
+            style={[
+              styles.removeFakeBtn,
+              {
+                backgroundColor: theme.name === 'dark' ? 'rgba(239, 68, 68, 0.12)' : '#FEF2F2',
+                borderColor: 'rgba(239, 68, 68, 0.35)',
+              },
+            ]}
+            onPress={handleRemoveFakeReport}
+          >
+            <Trash2 size={15} color="#EF4444" />
+            <Text style={styles.removeFakeBtnText}>
+              {hazard.ai_verification_verdict?.toLowerCase() === 'inconsistent'
+                ? '🗑️ Remove Verified Fake Report'
+                : '🗑️ Remove / Flag as Fake'}
+            </Text>
           </Pressable>
 
           <View style={styles.actionRow}>
@@ -493,6 +541,22 @@ const styles = StyleSheet.create({
     color: "#CBD5E1",
     fontSize: 12,
     fontWeight: "600",
+  },
+  removeFakeBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: 8,
+    marginBottom: 8,
+  },
+  removeFakeBtnText: {
+    color: "#EF4444",
+    fontSize: 13,
+    fontWeight: "700",
   },
   protocolNotice: {
     backgroundColor: "#11141D",

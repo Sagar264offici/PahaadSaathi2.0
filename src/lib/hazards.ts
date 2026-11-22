@@ -18,7 +18,8 @@ export type ReportStatus =
   | 'corroborated'
   | 'confirmed_closure'
   | 'resolved'
-  | 'rejected';
+  | 'rejected'
+  | 'dismissed';
 
 export type Hazard = {
   id: string;

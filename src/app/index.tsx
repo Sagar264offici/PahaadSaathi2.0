@@ -222,9 +222,16 @@ export default function HomeScreen() {
     triggerProximityNotification(hazard, distanceKm);
   }, [userLocation, triggerProximityNotification]);
 
-  // Calculate distance from current user location for each hazard
+  // Calculate distance from current user location for each hazard (automatically excludes fake / rejected reports)
   const hazardsWithDistance = useMemo(() => {
-    return hazards.map((item) => {
+    return hazards
+      .filter(
+        (item) =>
+          item.status !== 'rejected' &&
+          item.status !== 'dismissed' &&
+          item.ai_verification_verdict?.toLowerCase() !== 'inconsistent'
+      )
+      .map((item) => {
       let distanceKm = 2.5; // fallback representative
       if (item.latitude && item.longitude && userLocation) {
         const meters = calculateHaversineDistanceMeters(
