@@ -272,17 +272,30 @@ export default function ReportScreen() {
       let photoUrl: string | null = null;
       if (photo) {
         try {
-          const { uploadHazardPhoto } = await import('@/lib/storage');
-          const up = await uploadHazardPhoto(photo);
-          if (up.success && up.url) {
-            photoUrl = up.url;
-          } else if (up.url) {
-            photoUrl = up.url;
-          } else {
+          const { semanticEvidenceService } = await import('@/services/media/SemanticEvidenceService');
+          const evidenceRes = await semanticEvidenceService.processEvidence({
+            reportId: String(Date.now()),
+            photoUri: photo.uri,
+            hazardType,
+            description: description.trim(),
+            options: { profile: 'moderate' },
+          });
+          photoUrl = evidenceRes.evidenceUrl;
+        } catch (evidenceErr) {
+          console.warn('[Report] PSEP processing notice, using storage fallback:', evidenceErr);
+          try {
+            const { uploadHazardPhoto } = await import('@/lib/storage');
+            const up = await uploadHazardPhoto(photo);
+            if (up.success && up.url) {
+              photoUrl = up.url;
+            } else if (up.url) {
+              photoUrl = up.url;
+            } else {
+              photoUrl = photo.uri ?? null;
+            }
+          } catch {
             photoUrl = photo.uri ?? null;
           }
-        } catch {
-          photoUrl = photo.uri ?? null;
         }
       }
 

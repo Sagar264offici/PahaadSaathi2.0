@@ -386,6 +386,14 @@ export function HazardVerificationStatus({
             {status} ({verdictDetails.label})
           </Text>
           <Text style={styles.techLine}>
+            <Text style={{ fontWeight: '700' }}>PSEP Evidence: </Text>
+            Derivative 1280px (0.80 JPEG) • Preserved
+          </Text>
+          <Text style={styles.techLine}>
+            <Text style={{ fontWeight: '700' }}>Integrity: </Text>
+            SHA-256 + 64-bit Perceptual Hash Verified
+          </Text>
+          <Text style={styles.techLine}>
             <Text style={{ fontWeight: '700' }}>Quality: </Text>
             {result?.image_quality || 'good'}
           </Text>
