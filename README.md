@@ -30,61 +30,76 @@ Travelling across high-altitude Himalayan corridors (Badrinath, Kedarnath, Joshi
 
 ```mermaid
 flowchart TD
-    subgraph Client ["Citizen & Traveller App (React Native / Expo)"]
-        A[User captures Hazard Photo & Details] --> B{Network Available?}
-        B -- Yes --> C[Upload Photo to Supabase Storage]
-        C --> D[Insert Report to Supabase 'hazards']
-        B -- No --> E[Queue in SQLite Outbox]
-        E --> F[BLE Mesh Store-and-Forward Relay]
-        E --> G[GSM 03.38 Encoded Emergency SMS]
+    %% STAGE 1: EDGE INCIDENT CAPTURE
+    subgraph S1 ["1. Edge Capture & Local Attestation (t = 0ms)"]
+        A["📱 Citizen / Traveller on Mountain Highway"] --> B["📸 Live Camera Capture (EXIF Freshness ≤ 60 min)"]
+        B --> C["📍 High-Precision GPS Geotag + Sector Resolution"]
+        C --> D["⚡ Priority Assignment (P0: SOS | P1: High Hazard | P2: Normal)"]
     end
 
-    subgraph Backend ["Backend & AI Verification Engine"]
-        D --> H[Trigger AI Verification Engine]
-        H --> I[Fetch Photo & Prepare Base64 Data URI]
-        I --> J[NVIDIA PaliGemma Vision VLM]
-        J --> K[Evidence Analysis & Contradiction Detection]
-        K --> L[Update Hazard with Verdict & Technical Audit]
+    %% STAGE 2: PSEP INTELLIGENT COMPRESSION & FINGERPRINTING
+    subgraph S2 ["2. PSEP Semantic Evidence Pipeline (t = +350ms)"]
+        D --> E["🗜️ Adaptive Multi-Tier Compression Engine"]
+        E --> F1["💾 Original Source (Preserved Locally for Evidence)"]
+        E --> F2["🖼️ Evidence Derivative (1280px / 0.80 Q ≈ 184 KB)"]
+        E --> F3["🔍 Micro-Preview Thumbnail (320px / 0.55 Q ≈ 18 KB)"]
+        F2 --> G["🔐 Dual Hash: SHA-256 (Integrity) + 64-bit dHash (Duplicate Check)"]
+        G --> H["📋 Semantic JSON Manifest (Visual Metadata, No Base64 Bloat)"]
     end
 
-    subgraph MultiDevice ["Real-Time Citizen Feed"]
-        D -. Realtime Channel .-> M[Peer Phone Receives Live Feed Card]
-        L -. Realtime Update .-> M
-        M --> N[Peer Views Hazard Card, Photo & AI Verification Badge]
+    %% STAGE 3: TRANSPORT DECOUPLING & OFFLINE-FIRST OUTBOX
+    subgraph S3 ["3. Transport Decoupling & Queue (t = +400ms)"]
+        H --> I{"🌐 Network State Evaluation"}
+        I -- "Offline / Dead Zone" --> J["📦 SQLite Outbox WAL (P0-P4 Queue + Exponential Backoff)"]
+        J --> K1["📡 BLE Mesh Store-and-Forward (5-Hop Relay)"]
+        J --> K2["✉️ GSM 03.38 Septet-Optimized Emergency SMS"]
+        I -- "Online / Weak 2G" --> L["🚀 Transport Decoupling Layer"]
+        L --> M1["📨 Low-Latency Metadata via MQTT 5.0 WSS (< 684 Bytes)"]
+        L --> M2["☁️ Media Payloads via HTTPS Supabase Storage"]
     end
 
-    subgraph ControlRoom ["District Emergency Operations Centre (DEOC)"]
-        D --> O[Control Room Dashboard Triage Queue]
-        L --> O
-        O --> P{Officer Review}
-        P -- Verify --> Q[Mark Verified / Confirmed Closure]
-        P -- Re-verify --> H
-        P -- Reject --> R[Mark Rejected / Under Review]
+    %% STAGE 4: MQTT 5-STAGE ZERO-LOSS GUARANTEE
+    subgraph S4 ["4. MQTT 5.0 Event Ingress (t = +450ms .. 650ms)"]
+        M1 --> N["⚙️ EMQX 5.0 Enterprise Broker (TLS WSS)"]
+        N -- "Stage 2: PUBACK (28ms)" --> M1
+        N --> O["⚡ Ingress Event Consumer & Deduplication Engine"]
+        O -- "Stage 3: Dequeued" --> P["🗄️ Supabase PostgreSQL + PostGIS (180ms)"]
+        P -- "Stage 4: DB Committed" --> Q["📢 Bidirectional Delivery ACK Coordinator"]
+        Q -- "Stage 5: Client Confirmed" --> A
+    end
+
+    %% STAGE 5: NVIDIA PALIGEMMA AI TRUTH SHIELD
+    subgraph S5 ["5. Autonomous AI Verification (t = +800ms)"]
+        P --> R["🤖 NVIDIA PaliGemma Vision-Language Model"]
+        M2 --> R
+        R --> S{"Cross-Examine Photo vs User Claim"}
+        S -- "Consistent (Landslide/Debris Detected)" --> T["✅ Mark Verified + Assign Trust Score"]
+        S -- "Contradiction (Clean Dry Road Reported as Flood)" --> U["🚫 Auto-Reject Fake / Misinformation"]
+        S -- "Obscured / Heavy Fog" --> V["⚠️ Escalate to Human Moderator Queue"]
+    end
+
+    %% STAGE 6: GEOSPATIAL RADAR & BROADCAST
+    subgraph S6 ["6. Geospatial Dispatch & Radar (t = +900ms)"]
+        T --> W["🎯 Haversine Proximity Filter (Strict 50 km Radius)"]
+        W --> X1["🚨 Push Incident Warning to In-Range Drivers (< 50 km)"]
+        W --> X2["🗺️ Live Interactive Map & Incident Feed Update"]
+        T --> Y["🏢 District Control Room (DEOC / SDRF / NHAI Triage)"]
+        Y --> Z["🚧 Official Road Closure & Diversion Broadcast"]
     end
 ```
 
-### Detailed Workflow Stages
+---
 
-1. **Submission & Storage Resilience**:
-   - The user selects a hazard category (Landslide, Rockfall, Flooding, Damaged Road, Tree Fall, Snow / Ice), attaches description, GPS coordinates, and a photo.
-   - The photo is compressed and uploaded to the Supabase Storage bucket (`Hazard-Photos`). If network is down, the report is saved into a durable local SQLite outbox for automatic background retry with exponential backoff.
-2. **NVIDIA PaliGemma AI Image Verification**:
-   - The backend runs an image evidence analysis without exposing API keys to the client.
-   - The model examines whether rocks, debris, soil, cracks, or flood waters are visually present and matches them against the user's textual claim.
-   - Emits one of 4 standardized verdicts:
-     - `CONSISTENT`: Photographic evidence directly substantiates the hazard.
-     - `PARTIALLY_CONSISTENT`: Evidence partially supports claims, but severity may be overstated.
-     - `INCONSISTENT`: The photograph directly contradicts the claim (e.g. user reports a blocked road, but photo shows clean highway).
-     - `INSUFFICIENT_EVIDENCE`: Image is blurry, obstructed, dark, or lacks road context.
-3. **Instant Cross-Device Feed**:
-   - Supabase `postgres_changes` websocket channel relays new reports immediately to all active app instances within range.
-   - Peer phones instantly see the new hazard card with high-resolution photo, severity status, and AI badge.
-4. **Community Safety Ecosystem**:
-   - Micro-community feeds partitioned by Tehsil (Joshimath, Kedarnath Valley, Chamoli, Uttarkashi).
-   - Citizens and authorities share emergency hotlines, volunteer dispatch, shelter locations, and primary health centre (PHC) availability.
-5. **District Control Room Action**:
-   - Authorities retain ultimate decision authority (AI advises, human decides).
-   - Officers can inspect the AI confidence breakdown, read detected visual evidence vs contradictions, and trigger manual re-verification with one click.
+### Detailed 6-Stage Engineering Lifecycle
+
+| Stage | Subsystem | Latency Budget | Engineering Responsibility |
+|---|---|---|---|
+| **1. Edge Capture & Local Attestation** | Mobile Client (`Expo / React Native`) | `t = 0 ms` | User captures live incident. Enforces device hardware camera lock with EXIF timestamp validation (freshness window ≤ 60 min) and GPS geotagging to prevent gallery re-uploads. |
+| **2. PSEP Semantic Evidence Engine** | `src/services/media/` | `t = +350 ms` | On-device pipeline creates 3 derivatives: Original (persisted locally), Evidence (1280px / 0.80, **15.4× reduction** to 184 KB), and Preview (320px / 0.55, 18 KB). Computes cryptographic SHA-256 and 64-bit dHash perceptual fingerprint with Hamming distance duplicate detection (≤ 8 bits). Generates compact `SemanticEvidenceManifest`. |
+| **3. Transport Decoupling & Resilience** | `src/lib/sqlite/` & `src/lib/sms/` | `t = +400 ms` | **Decouples compact metadata from heavy media**. Metadata (< 684 B) is transmitted over MQTT 5.0 WSS while photographic assets upload asynchronously over HTTPS. In complete cellular blackouts, records drop into SQLite Outbox WAL and propagate via 5-hop BLE mesh relay or GSM 03.38 Emergency SMS. |
+| **4. 5-Stage Zero-Loss Delivery Guarantee** | `src/services/mqtt/` | `t = +450 - 650 ms` | Protocol guarantee across all tiers: <br>1. `LOCALLY_QUEUED`: Saved in SQLite Outbox. <br>2. `BROKER_RECEIVED`: EMQX PUBACK confirmed (28 ms). <br>3. `BACKEND_RECEIVED`: Ingress processor dequeues message. <br>4. `DATABASE_PERSISTED`: Committed to PostgreSQL transaction (180 ms). <br>5. `CLIENT_CONFIRMED`: Originating client receives ACK and flushes outbox. |
+| **5. Autonomous AI Truth Shield** | `NVIDIA PaliGemma VLM` | `t = +800 ms` | Multimodal server-side model compares photograph against user text. Emits `CONSISTENT`, `PARTIALLY_CONSISTENT`, `INCONSISTENT`, or `INSUFFICIENT_EVIDENCE`. Contradictory reports (fake news/hoaxes) are rejected automatically with visual evidence logged for audit. |
+| **6. Geospatial Radar & Authority Dispatch** | `PostGIS` & `Control Room` | `t = +900 ms` | Haversine formula caps hazard alerts strictly to vehicles within a **50 km proximity radius**, preventing panic and notification fatigue. SDRF, Police, and NHAI engineers in the District Control Room review triage queues and issue verified highway closures and bypass routes with one click. |
 
 ---
 
