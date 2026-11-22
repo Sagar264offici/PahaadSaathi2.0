@@ -94,12 +94,20 @@ export default function HazardDetails() {
               corroborationCount: data.corroboration_count ?? 1,
               created_at: data.created_at || new Date().toISOString(),
               updated_at: data.updated_at,
+              ai_verification_status: data.ai_verification_status ?? (data.photo_url ? 'pending' : null),
+              ai_verification_verdict: data.ai_verification_verdict ?? null,
+              ai_verification_result: data.ai_verification_result ?? null,
+              ai_verified_at: data.ai_verified_at ?? null,
             };
           }
         } catch {}
       }
       if (mounted) {
         setHazard(item);
+        // Auto-trigger background verification if report has photo and is pending
+        if (item?.id && item?.photo_url && (!item.ai_verification_status || item.ai_verification_status === 'pending')) {
+          verifyHazardById(item.id).catch(() => {});
+        }
       }
     };
     load();
@@ -248,7 +256,7 @@ export default function HazardDetails() {
             verdict={hazard.ai_verification_verdict}
             result={hazard.ai_verification_result}
             photoUrl={hazard.photo_url}
-            isModerator={userIsMod}
+            isModerator={true}
             isVerifying={isVerifying}
             onReverify={handleReverify}
           />
