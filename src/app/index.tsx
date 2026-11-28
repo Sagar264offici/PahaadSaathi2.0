@@ -1,89 +1,69 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { AppPressable as Pressable } from '@/components/ui/AppPressable';
+import { AppText as Text } from '@/components/ui/AppText';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Image } from 'expo-image';
-import {
-  Alert,
-  Animated,
-  Linking,
-  Platform,
-  Pressable,
-  RefreshControl,
-  Share,
-  StatusBar,
-  StyleSheet,
-  Text,
-  Vibration,
-  View,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Link, useRouter, type Href } from 'expo-router';
 import * as Location from 'expo-location';
 import {
-  ShieldAlert,
-  AlertTriangle,
-  Users,
-  MapPin,
-  Building2,
-  PhoneCall,
-  BookOpen,
-  ChevronRight,
-  Radio,
-  Bell,
-  ThumbsUp,
-  Share2,
-  Filter,
-  Zap,
-  Navigation,
-  CheckCircle2,
-  Clock,
-  X,
-  Plus,
+  ActivityIndicator, Alert, Linking, RefreshControl, Share,
+  StyleSheet, Vibration, View, useWindowDimensions, ScrollView as NativeScrollView,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  AlertTriangle, ArrowUpRight, Bell, BookOpen, Building2, ChevronRight,
+  ClipboardPlus, Clock, Eye, Map, MapPin, Phone, Radio, RefreshCw, Share2, Shield,
+  ShieldCheck, ThumbsUp, UserRound, Users, Wifi, WifiOff, X,
 } from 'lucide-react-native';
-
 import { useTheme } from '@/hooks/useTheme';
+import { useConnectivity } from '@/hooks/useConnectivity';
+import { useDesktopNavigation } from '@/components/AppNavigation';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { SmoothScrollView as ScrollView } from '@/components/SmoothScrollView';
-import { Palette, Radii, Spacing, Typography } from '@/theme/tokens';
+import { BottomNavigation } from '@/components/BottomNavigation';
+import { StatusLabel } from '@/components/ui/StatusLabel';
+import { Palette, Radii } from '@/theme/tokens';
 import {
-  Hazard,
-  getHazards,
-  subscribe,
-  getOfflineQueue,
-  syncOfflineQueue,
-  corroborateHazard,
-  initRealtimeHazardSubscription,
-  simulateNearbyHazardUpload,
-  refreshHazards,
+  type Hazard, getHazards, subscribe, getOfflineQueue, syncOfflineQueue, corroborateHazard,
+  initRealtimeHazardSubscription, simulateNearbyHazardUpload, refreshHazards, isDemoHazard,
 } from '@/data/hazardStore';
 import { calculateHaversineDistanceMeters } from '@/lib/incidents/deduplication';
 import { communityStore } from '@/data/communityStore';
-import { MOUNTAIN_SAFETY_GUIDES } from '@/data/safetyGuides';
 import { UTTARAKHAND_EMERGENCY_DIRECTORY } from '@/lib/sms/directory';
-import { useConnectivity } from '@/hooks/useConnectivity';
-import { NetworkIndicator, ConnectivityStatus } from '@/components/ui/NetworkIndicator';
-import { OfflineBanner } from '@/components/ui/OfflineBanner';
-import { Badge } from '@/components/ui/Badge';
-import { StatusLabel } from '@/components/ui/StatusLabel';
-import { BottomNavigation } from '@/components/BottomNavigation';
 
-type FeedFilter = 'all' | 'nearby' | 'critical' | 'verified';
+const SECTOR_LOCATION = { latitude: 30.5564, longitude: 79.5638 };
+const actions = [
+  { title: 'Report a hazard', detail: 'Share a road or weather hazard', href: '/report', icon: ClipboardPlus },
+  { title: 'Hazard map', detail: 'Check routes and closures', href: '/map', icon: Map },
+  { title: 'Community aid', detail: 'Request or offer local help', href: '/community', icon: Users },
+  { title: 'Safety guides', detail: 'Read offline safety guidance', href: '/explore', icon: BookOpen },
+] as const;
+
+const resources = [
+  { title: 'Resident alerts', href: '/resident/alerts', icon: Bell },
+  { title: 'Offline relay', href: '/relay', icon: Radio },
+  { title: 'Control room', href: '/control-room', icon: Building2 },
+] as const;
+
+type FeedFilter = 'all' | 'landslide' | 'road' | 'weather' | 'critical' | 'verified' | 'nearby';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { theme } = useTheme();
-  const { isOnline } = useConnectivity();
+  const { theme, isDark } = useTheme();
+  const { isConnected } = useConnectivity();
+  const desktop = useDesktopNavigation();
+  const { width } = useWindowDimensions();
+  const twoColumns = width >= 820;
 
   const [hazards, setHazards] = useState<Hazard[]>(getHazards());
   const [queueCount, setQueueCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
-  const [selectedLanguage, setSelectedLanguage] = useState<'en' | 'hi'>('en');
   const [activeFilter, setActiveFilter] = useState<FeedFilter>('all');
   const [corroboratedIds, setCorroboratedIds] = useState<Record<string, boolean>>({});
 
   // Active user location (defaults to Joshimath, Chamoli Sector coordinates)
-  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number }>({
-    latitude: 30.5564,
-    longitude: 79.5638,
-  });
+  const [gpsLocation, setGpsLocation] = useState<typeof SECTOR_LOCATION | null>(null);
+  const userLocation = gpsLocation ?? SECTOR_LOCATION;
 
   // Range-based Heads-Up In-App Notification Banner
   const [activeNotification, setActiveNotification] = useState<{
@@ -91,49 +71,32 @@ export default function HomeScreen() {
     distanceKm: number;
   } | null>(null);
 
-  const notifSlideAnim = useRef(new Animated.Value(-120)).current;
-
   const triggerProximityNotification = useCallback((hazard: Hazard, distanceKm: number) => {
-    // Strict 50 km geographical radius:
-    // If the person is farther than 50 km, suppress notification completely.
-    if (distanceKm > 50) {
-      return;
-    }
-
+    if (distanceKm > 50) return;
     setActiveNotification({ hazard, distanceKm });
     try {
       Vibration.vibrate([0, 250, 100, 250]);
-    } catch {}
+    } catch { /* Vibration is optional on this device. */ }
+  }, []);
 
-    Animated.spring(notifSlideAnim, {
-      toValue: 0,
-      useNativeDriver: true,
-      friction: 8,
-      tension: 40,
-    }).start();
-  }, [notifSlideAnim]);
+  const dismissNotification = () => setActiveNotification(null);
 
-  const dismissNotification = useCallback(() => {
-    Animated.timing(notifSlideAnim, {
-      toValue: -150,
-      duration: 250,
-      useNativeDriver: true,
-    }).start(() => setActiveNotification(null));
-  }, [notifSlideAnim]);
-
-  const activeCommunity = communityStore.getCommunities()[0]; // Default Joshimath, Chamoli
+  const activeCommunity = communityStore.getCommunities()[0];
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
+    setRefreshError(false);
     try {
       await refreshHazards();
+    } catch {
+      setRefreshError(true);
     } finally {
       setRefreshing(false);
     }
   }, []);
 
-  // Request GPS position for precise distance calculation
   useEffect(() => {
     (async () => {
       try {
@@ -142,7 +105,7 @@ export default function HomeScreen() {
           const loc = await Location.getCurrentPositionAsync({
             accuracy: Location.Accuracy.Balanced,
           });
-          setUserLocation({
+          setGpsLocation({
             latitude: loc.coords.latitude,
             longitude: loc.coords.longitude,
           });
@@ -153,19 +116,14 @@ export default function HomeScreen() {
     })();
   }, []);
 
-  // Listen to hazard updates & Realtime Supabase broadcast
   useEffect(() => {
     const unsubHazards = subscribe((items) => setHazards(items));
-
-    // Initial fetch from remote Supabase table so all community reports immediately display
     refreshHazards().catch(() => {});
 
-    // Polling fallback every 15s ensures reports from friends appear reliably
     const pollInterval = setInterval(() => {
       refreshHazards().catch(() => {});
     }, 15000);
 
-    // Connect to Supabase Realtime channel for incoming uploads from other users
     const unsubRealtime = initRealtimeHazardSubscription((incomingHazard, dist) => {
       let distance = dist;
       if (typeof distance !== 'number' && incomingHazard.latitude && incomingHazard.longitude && userLocation) {
@@ -177,11 +135,8 @@ export default function HomeScreen() {
         );
         distance = Math.round((meters / 1000) * 10) / 10;
       }
-      // If person is outer than 50 km, they do NOT receive the notification
       if (typeof distance === 'number') {
-        if (distance > 50) {
-          return;
-        }
+        if (distance > 50) return;
         triggerProximityNotification(incomingHazard, distance);
       }
     }, userLocation);
@@ -221,7 +176,7 @@ export default function HomeScreen() {
     setCorroboratedIds((prev) => ({ ...prev, [hazardId]: true }));
     try {
       Vibration.vibrate(50);
-    } catch {}
+    } catch { /* Optional */ }
     await corroborateHazard(hazardId);
   }, [corroboratedIds]);
 
@@ -229,18 +184,16 @@ export default function HomeScreen() {
     try {
       await Share.share({
         title: `PahaadSaathi Hazard Alert: ${hazard.type}`,
-        message: `🚨 [PahaadSaathi Alert] ${hazard.type.toUpperCase()} reported at ${hazard.location}.\nStatus: ${hazard.status}\nDetails: ${hazard.description}\nLive link: https://pahaadsaathi-app.vercel.app`,
+        message: `PahaadSaathi · ${isDemoHazard(hazard) ? "Demo report" : "Hazard alert"}\n${hazard.type} at ${hazard.location}\n${hazard.description}\nhttps://pahaadsaathi-app.vercel.app`,
       });
-    } catch {}
+    } catch { /* Cancelled */ }
   }, []);
 
-  // Simulates: "One guy uploaded and the other ranged guy gets the information through notification"
   const handleSimulateRemoteUpload = useCallback(() => {
     const { hazard, distanceKm } = simulateNearbyHazardUpload(userLocation);
     triggerProximityNotification(hazard, distanceKm);
   }, [userLocation, triggerProximityNotification]);
 
-  // Calculate distance from current user location for each hazard (automatically excludes fake / rejected reports)
   const hazardsWithDistance = useMemo(() => {
     return hazards
       .filter(
@@ -250,33 +203,30 @@ export default function HomeScreen() {
           item.ai_verification_verdict?.toLowerCase() !== 'inconsistent'
       )
       .map((item) => {
-      let distanceKm = 2.5; // fallback representative
-      if (item.latitude && item.longitude && userLocation) {
-        const meters = calculateHaversineDistanceMeters(
-          userLocation.latitude,
-          userLocation.longitude,
-          item.latitude,
-          item.longitude
-        );
-        distanceKm = Math.round((meters / 1000) * 10) / 10;
-      }
-      return {
-        ...item,
-        distanceKm,
-      };
-    });
+        const distanceKm = item.latitude != null && item.longitude != null
+          ? calculateHaversineDistanceMeters(
+              userLocation.latitude, userLocation.longitude, item.latitude, item.longitude,
+            ) / 1000
+          : null;
+        return { ...item, distanceKm };
+      });
   }, [hazards, userLocation]);
 
-  // Filtered feed items
   const filteredFeed = useMemo(() => {
     switch (activeFilter) {
       case 'nearby':
-        return hazardsWithDistance.filter((h) => h.distanceKm <= 15);
+        return hazardsWithDistance.filter((h) => !isDemoHazard(h) && h.distanceKm != null && h.distanceKm <= 15);
       case 'critical':
-        return hazardsWithDistance.filter((h) => h.severity === 'High');
+        return hazardsWithDistance.filter((h) => !isDemoHazard(h) && h.severity === 'High');
+      case 'landslide':
+        return hazardsWithDistance.filter((h) => !isDemoHazard(h) && h.type.toLowerCase().includes('landslide'));
+      case 'road':
+        return hazardsWithDistance.filter((h) => !isDemoHazard(h) && (h.type.toLowerCase().includes('road') || h.status === 'confirmed_closure'));
+      case 'weather':
+        return hazardsWithDistance.filter((h) => !isDemoHazard(h) && (h.type.toLowerCase().includes('water') || h.type.toLowerCase().includes('flood') || h.type.toLowerCase().includes('rain')));
       case 'verified':
         return hazardsWithDistance.filter(
-          (h) => h.status === 'corroborated' || h.status === 'confirmed_closure'
+          (h) => !isDemoHazard(h) && (h.status === 'corroborated' || h.status === 'confirmed_closure')
         );
       case 'all':
       default:
@@ -285,1355 +235,845 @@ export default function HomeScreen() {
   }, [hazardsWithDistance, activeFilter]);
 
   const nearbyCount = useMemo(() => {
-    return hazardsWithDistance.filter((h) => h.distanceKm <= 15).length;
+    return hazardsWithDistance.filter((h) => !isDemoHazard(h) && h.distanceKm != null && h.distanceKm <= 15).length;
   }, [hazardsWithDistance]);
 
-  const connectivityState: ConnectivityStatus =
-    isOnline === false
-      ? 'OFFLINE_WITH_CELLULAR'
-      : isOnline === true
-      ? 'ONLINE'
-      : 'UNKNOWN';
+  const filters: { value: FeedFilter; label: string }[] = [
+    { value: 'all', label: 'All Alerts' },
+    { value: 'landslide', label: 'Landslides' },
+    { value: 'road', label: 'Road Blocks' },
+    { value: 'weather', label: 'Weather & Rain' },
+    { value: 'critical', label: 'High Risk' },
+    { value: 'verified', label: 'Verified Reports' },
+    { value: 'nearby', label: `Nearby (<15km) · ${nearbyCount}` },
+  ];
 
-  const isDark = theme.name === 'dark';
+  const networkLabel = isConnected === null ? 'Checking connection' : isConnected ? 'Online' : 'Offline';
+  const networkColor = isConnected === null ? theme.textTertiary : isConnected ? theme.success : theme.warning;
+  const NetworkIcon = isConnected === false ? WifiOff : Wifi;
+  const cardStyle = { backgroundColor: theme.surface, borderColor: theme.border };
+  const sector = `${activeCommunity.name}, ${activeCommunity.district}`;
+
+  const featuredHazard = filteredFeed[0];
+  const secondaryHazards = filteredFeed.slice(1);
+
+  const actionPanel = (
+    <View style={[styles.panel, cardStyle]}>
+      <View style={[styles.panelHeader, { borderColor: theme.border }]}>
+        <Text accessibilityRole="header" style={[styles.panelTitle, { color: theme.textPrimary }]}>Quick actions</Text>
+      </View>
+      <View style={!twoColumns && styles.actionsGrid}>
+        {actions.map(({ title, detail, href, icon: Icon }) => (
+          <Link key={href} href={href} asChild>
+            <Pressable accessibilityRole="link" style={StyleSheet.flatten([
+              styles.panelRow, !twoColumns && styles.actionCell, { borderColor: theme.border },
+            ])}>
+              <Icon size={19} color={Palette.cobalt} strokeWidth={1.8} />
+              <View style={styles.flex}>
+                <Text style={[styles.actionTitle, { color: theme.textPrimary }]}>{title}</Text>
+                {twoColumns && <Text style={[styles.small, { color: theme.textSecondary }]}>{detail}</Text>}
+              </View>
+              {twoColumns && <ChevronRight size={15} color={theme.textTertiary} />}
+            </Pressable>
+          </Link>
+        ))}
+      </View>
+    </View>
+  );
 
   return (
-    <SafeAreaView
-      style={[
-        styles.safeArea,
-        {
-          backgroundColor: isDark ? Palette.surfaceDark : Palette.glacier,
-        },
-      ]}
-    >
-      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
-
-      {/* Floating Range Proximity Notification Toast */}
-      {activeNotification && (
-        <Animated.View
-          style={[
-            styles.notificationToast,
-            {
-              transform: [{ translateY: notifSlideAnim }],
-              backgroundColor: isDark ? '#1F1212' : '#FEF2F2',
-              borderColor: Palette.rescueRed,
-            },
-          ]}
-        >
-          <View style={styles.notifIconCircle}>
-            <Bell size={20} color={Palette.snow} />
-          </View>
-          <View style={styles.notifTextGroup}>
-            <View style={styles.notifHeaderRow}>
-              <Text style={styles.notifPill}>
-                🚨 PROXIMITY ALERT • {activeNotification.distanceKm} km AWAY
+    <SafeAreaView style={[styles.screen, { backgroundColor: isDark ? '#080C14' : '#F9F8F6' }]}>
+      {/* SHIELD-INSPIRED MODERN APP HEADER */}
+      <View style={[styles.header, { backgroundColor: isDark ? 'rgba(8, 12, 20, 0.95)' : 'rgba(249, 248, 246, 0.95)', borderColor: theme.border }]}>
+        <View style={styles.headerInner}>
+          <View style={styles.headerBrand}>
+            <View style={styles.shieldBadge}>
+              <Shield size={20} color="#FFFFFF" strokeWidth={2.4} />
+            </View>
+            <View style={styles.flex}>
+              <Text accessibilityRole="header" style={[styles.headerBrandTitle, { color: theme.textPrimary }]}>
+                PAHAADSAATHI
               </Text>
-              <Pressable
-                onPress={dismissNotification}
-                hitSlop={10}
-                accessibilityRole="button"
-                accessibilityLabel="Dismiss notification"
-              >
-                <X size={16} color={Palette.slateMuted} />
-              </Pressable>
-            </View>
-            <Text style={[styles.notifTitle, { color: isDark ? Palette.snow : Palette.pineForest }]}>
-              {activeNotification.hazard.type}: {activeNotification.hazard.location}
-            </Text>
-            <Text style={styles.notifDesc} numberOfLines={2}>
-              {activeNotification.hazard.description}
-            </Text>
-            <View style={styles.notifActionRow}>
-              <Pressable
-                style={[styles.notifActionBtn, { backgroundColor: Palette.pineForestContainer }]}
-                onPress={() => {
-                  const targetId = activeNotification.hazard.id;
-                  dismissNotification();
-                  router.push(`/hazard/${targetId}` as any);
-                }}
-              >
-                <Text style={[styles.notifActionBtnText, { color: Palette.pineForest, fontWeight: '700' }]}>
-                  View Report & Photo
-                </Text>
-              </Pressable>
-              <Pressable
-                style={styles.notifActionBtn}
-                onPress={() => {
-                  dismissNotification();
-                  router.push('/map');
-                }}
-              >
-                <Navigation size={13} color={Palette.snow} />
-                <Text style={styles.notifActionBtnText}>View on Map</Text>
-              </Pressable>
-            </View>
-          </View>
-        </Animated.View>
-      )}
-
-      {/* App Header */}
-      <View
-        accessibilityRole="header"
-        {...(Platform.OS === 'web' ? ({ role: 'banner' } as any) : {})}
-        style={[
-          styles.header,
-          {
-            backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-            borderBottomColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-          },
-        ]}
-      >
-        <View style={styles.brandRow}>
-          <View style={styles.brandLogoCircle}>
-            <Radio size={18} color={Palette.snow} />
-          </View>
-          <View>
-            <Text
-              style={[
-                styles.brandTitle,
-                { color: isDark ? Palette.snow : Palette.pineForest },
-              ]}
-            >
-              PAHAADSAATHI
-            </Text>
-            <View style={styles.communitySubhead}>
-              <MapPin size={12} color={Palette.pineForestMuted} />
-              <Text style={styles.communityText}>
-                {activeCommunity.name}, {activeCommunity.district} Sector
+              <Text style={[styles.headerBrandSub, { color: theme.textSecondary }]}>
+                Mountain Safety Network · Chamoli
               </Text>
             </View>
           </View>
-        </View>
-
-        <View style={styles.headerControls}>
-          <Pressable
-            style={styles.langToggle}
-            onPress={() => setSelectedLanguage(selectedLanguage === 'en' ? 'hi' : 'en')}
-            accessibilityRole="button"
-            accessibilityLabel="Toggle Language"
-            {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
-          >
-            <Text style={styles.langText}>
-              {selectedLanguage === 'en' ? 'हिन्दी' : 'EN'}
-            </Text>
-          </Pressable>
-          <ThemeToggle />
+          <View style={styles.controls}>
+            {desktop && (
+              <View style={[styles.headerLocation, { borderColor: theme.border }]}>
+                <MapPin size={15} color={Palette.cobalt} />
+                <Text style={[styles.small, { color: theme.textSecondary }]}>{sector}</Text>
+              </View>
+            )}
+            <View accessibilityLabel={networkLabel} style={[styles.networkPill, { backgroundColor: isDark ? '#1E293B' : '#EFF6FF' }]}>
+              <NetworkIcon size={13} color={networkColor} />
+              {width > 360 && <Text style={[styles.networkText, { color: networkColor }]}>{networkLabel}</Text>}
+            </View>
+            <Link href="/account" asChild>
+              <Pressable accessibilityRole="link" accessibilityLabel="User profile" style={styles.avatarBtn}>
+                <View style={[styles.avatarInner, { backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }]}>
+                  <UserRound size={17} color={Palette.cobalt} strokeWidth={2.2} />
+                </View>
+                <View style={styles.avatarOnlineDot} />
+              </Pressable>
+            </Link>
+            <ThemeToggle />
+          </View>
         </View>
       </View>
 
-      {/* Main Landmark Container */}
-      <View
-        {...(Platform.OS === 'web' ? ({ role: 'main' } as any) : {})}
-        style={styles.mainContainer}
-      >
-        {/* Connectivity & Offline Banner */}
-        <NetworkIndicator status={connectivityState} />
-        <OfflineBanner
-          pendingCount={queueCount}
-          syncing={syncing}
-          onSyncPress={handleSyncQueue}
-        />
-
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={handleRefresh}
-              tintColor={isDark ? Palette.pineForestContainer : Palette.pineForest}
-              colors={[Palette.pineForest]}
-            />
-          }
-          {...(Platform.OS === 'web' ? ({ tabIndex: 0, 'aria-label': 'Live Incident Feed' } as any) : {})}
-        >
-          {/* Urgent SOS Trigger Banner */}
-          <Pressable
-            style={styles.sosEmergencyBanner}
-            onPress={() => router.push('/emergency')}
-            accessibilityRole="button"
-            accessibilityLabel="Open Emergency Assistance SOS"
-            {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
-          >
-            <View style={styles.sosBannerLeft}>
-              <View style={styles.sosPulseIcon}>
-                <ShieldAlert size={26} color={Palette.snow} />
-              </View>
-              <View style={styles.sosBannerTextGroup}>
-                <Text style={styles.sosBannerTitle}>EMERGENCY ASSISTANCE (SOS)</Text>
-                <Text style={styles.sosBannerSub}>
-                  1-Touch Dispatch • GPS Telemetry • Offline SMS Fallback
-                </Text>
-              </View>
-            </View>
-            <ChevronRight size={22} color={Palette.snow} />
+      {/* Heads-up alert banner if notification active */}
+      {activeNotification && (
+        <View accessibilityLiveRegion="polite" style={[
+          styles.notification, cardStyle, { borderLeftColor: theme.error },
+        ]}>
+          <Bell size={19} color={theme.error} />
+          <View style={styles.flex}>
+            <Text style={[styles.actionTitle, { color: theme.textPrimary }]}>
+              {isDemoHazard(activeNotification.hazard) ? 'Demo proximity alert' : 'Nearby hazard alert'}
+            </Text>
+            <Text style={[styles.small, { color: theme.textSecondary }]}>
+              {activeNotification.hazard.type} · {activeNotification.hazard.location} · {activeNotification.distanceKm} km
+            </Text>
+            <Pressable accessibilityRole="button" onPress={() => {
+              const id = activeNotification.hazard.id;
+              dismissNotification();
+              router.push({ pathname: '/hazard/[id]', params: { id } });
+            }}>
+              <Text style={[styles.linkText, { color: Palette.cobalt }]}>View report</Text>
+            </Pressable>
+          </View>
+          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss alert" onPress={dismissNotification} hitSlop={10}>
+            <X size={18} color={theme.textSecondary} />
           </Pressable>
+        </View>
+      )}
 
-          {/* Quick Actions Grid */}
-          <View style={styles.actionGrid}>
-            <Pressable
-              style={[
-                styles.actionTile,
-                {
-                  backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => router.push('/report')}
-              accessibilityRole="button"
-              accessibilityLabel="Report Hazard: Landslides, washouts, road blocks"
-              {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
-            >
-              <View style={[styles.tileIconCircle, { backgroundColor: Palette.saffronLight }]}>
-                <AlertTriangle size={20} color={Palette.saffron} />
-              </View>
-              <Text
-                style={[
-                  styles.tileTitle,
-                  { color: isDark ? Palette.snow : Palette.pineForest },
-                ]}
-              >
-                Report Hazard
-              </Text>
-              <Text style={styles.tileSub}>Alert nearby drivers</Text>
-            </Pressable>
+      <ScrollView
+        style={styles.flex}
+        contentContainerStyle={[styles.content, desktop && styles.desktopGutter]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={Palette.cobalt} />}
+      >
+        {/* SHIELD-INSPIRED HERO GREETING */}
+        <View style={styles.headlineSection}>
+          <Text style={[styles.headlineMain, { color: theme.textPrimary }]}>
+            What&apos;s Happening Nearby,{'\n'}
+            <Text style={{ color: Palette.terracotta }}>Get Safety Alerts</Text>
+          </Text>
+        </View>
 
-            <Pressable
-              style={[
-                styles.actionTile,
-                {
-                  backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => router.push('/community' as any)}
-              accessibilityRole="button"
-              accessibilityLabel="Community Aid: Help exchange, local feed & volunteers"
-              {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
-            >
-              <View style={[styles.tileIconCircle, { backgroundColor: Palette.pineForestContainer }]}>
-                <Users size={20} color={Palette.pineForest} />
-              </View>
-              <Text
-                style={[
-                  styles.tileTitle,
-                  { color: isDark ? Palette.snow : Palette.pineForest },
-                ]}
-              >
-                Community Aid
-              </Text>
-              <Text style={styles.tileSub}>Volunteer network</Text>
-            </Pressable>
-
-            <Pressable
-              style={[
-                styles.actionTile,
-                {
-                  backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => router.push('/map')}
-              accessibilityRole="button"
-              accessibilityLabel="Hazard Map: Shelters, routes & blocked passes"
-              {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
-            >
-              <View style={[styles.tileIconCircle, { backgroundColor: Palette.infoBlueLight }]}>
-                <MapPin size={20} color={Palette.infoBlue} />
-              </View>
-              <Text
-                style={[
-                  styles.tileTitle,
-                  { color: isDark ? Palette.snow : Palette.pineForest },
-                ]}
-              >
-                Hazard Map
-              </Text>
-              <Text style={styles.tileSub}>Blocked mountain passes</Text>
-            </Pressable>
-
-            <Pressable
-              style={[
-                styles.actionTile,
-                {
-                  backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => router.push('/control-room' as any)}
-              accessibilityRole="button"
-              accessibilityLabel="Control Room: DDMA & SDRF incident verification"
-              {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
-            >
-              <View style={[styles.tileIconCircle, { backgroundColor: Palette.verifiedGreenLight }]}>
-                <Building2 size={20} color={Palette.verifiedGreen} />
-              </View>
-              <Text
-                style={[
-                  styles.tileTitle,
-                  { color: isDark ? Palette.snow : Palette.pineForest },
-                ]}
-              >
-                Control Room
-              </Text>
-              <Text style={styles.tileSub}>DDMA / SDRF portal</Text>
-            </Pressable>
+        {/* SHIELD-INSPIRED LIVE TICKER PILL */}
+        <Pressable
+          style={[
+            styles.tickerBanner,
+            {
+              backgroundColor: isDark ? 'rgba(245, 158, 11, 0.12)' : '#FFFBEB',
+              borderColor: isDark ? 'rgba(245, 158, 11, 0.3)' : '#FDE68A',
+            },
+          ]}
+          onPress={() => {
+            if (featuredHazard) {
+              router.push({ pathname: '/hazard/[id]', params: { id: featuredHazard.id } });
+            }
+          }}
+        >
+          <View style={styles.tickerIconWrap}>
+            <AlertTriangle size={15} color="#D97706" />
           </View>
-
-          {/* Interactive Proximity Simulation Demo Banner */}
-          <View
-            style={[
-              styles.demoCard,
-              {
-                backgroundColor: isDark ? '#18241D' : '#F0FDF4',
-                borderColor: isDark ? '#2E4C38' : '#BBF7D0',
-              },
-            ]}
-          >
-            <View style={styles.demoCardLeft}>
-              <View style={styles.demoBadgeCircle}>
-                <Zap size={16} color={Palette.verifiedGreen} />
-              </View>
-              <View style={styles.demoCardText}>
-                <Text style={[styles.demoCardTitle, { color: isDark ? Palette.snow : Palette.pineForest }]}>
-                  Live Proximity Relay Network
-                </Text>
-                <Text style={styles.demoCardSub}>
-                  When one user uploads, all users in the 25km range get notified in real time.
-                </Text>
-              </View>
-            </View>
-            <Pressable
-              style={styles.demoTestBtn}
-              onPress={handleSimulateRemoteUpload}
-              accessibilityRole="button"
-              accessibilityLabel="Simulate remote user upload and range notification"
-            >
-              <Text style={styles.demoTestBtnText}>⚡ Simulate Upload</Text>
-            </Pressable>
-          </View>
-
-          {/* Feed Title & Range Filters */}
-          <View style={styles.feedHeaderRow}>
-            <View>
-              <Text
-                style={[
-                  styles.feedSectionTitle,
-                  { color: isDark ? Palette.snow : Palette.pineForest },
-                ]}
-              >
-                Live Mountain Hazard Feed
-              </Text>
-              <Text style={styles.feedSectionSub}>
-                {nearbyCount} reports within 15 km of your sector
+          <View style={styles.tickerContent}>
+            <Text style={[styles.tickerTitle, { color: isDark ? '#FDE68A' : '#92400E' }]} numberOfLines={1}>
+              {featuredHazard ? `${featuredHazard.type}: ${featuredHazard.location}` : 'BRO Road Clearance: NH-07 Live'}
+            </Text>
+            <View style={styles.tickerLiveSub}>
+              <View style={styles.tickerPulseDot} />
+              <Text style={[styles.tickerSubText, { color: isDark ? '#FCD34D' : '#B45309' }]}>
+                Live update
               </Text>
             </View>
-
-            <Pressable
-              style={styles.postHazardBtn}
-              onPress={() => router.push('/report')}
-            >
-              <Plus size={14} color={Palette.snow} />
-              <Text style={styles.postHazardBtnText}>Post Hazard</Text>
-            </Pressable>
           </View>
+          <View style={styles.tickerActionBtn}>
+            <Text style={styles.tickerActionText}>Live</Text>
+          </View>
+        </Pressable>
 
-          {/* Filter Pills */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.filterPillsScroll}
-            {...(Platform.OS === 'web' ? ({ tabIndex: 0, 'aria-label': 'Feed Filters' } as any) : {})}
-          >
-            <Pressable
-              style={[
-                styles.filterPill,
-                activeFilter === 'all' && styles.filterPillActive,
-                {
-                  backgroundColor:
-                    activeFilter === 'all'
-                      ? Palette.pineForest
-                      : isDark
-                      ? Palette.surfaceDarkElevated
-                      : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => setActiveFilter('all')}
-            >
-              <Text
-                style={[
-                  styles.filterPillText,
-                  {
-                    color:
-                      activeFilter === 'all'
-                        ? Palette.snow
-                        : isDark
-                        ? Palette.snow
-                        : Palette.pineForest,
-                  },
-                ]}
-              >
-                All Hazards ({hazardsWithDistance.length})
-              </Text>
-            </Pressable>
-
-            <Pressable
-              style={[
-                styles.filterPill,
-                activeFilter === 'nearby' && styles.filterPillActive,
-                {
-                  backgroundColor:
-                    activeFilter === 'nearby'
-                      ? Palette.pineForest
-                      : isDark
-                      ? Palette.surfaceDarkElevated
-                      : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => setActiveFilter('nearby')}
-            >
-              <Text
-                style={[
-                  styles.filterPillText,
-                  {
-                    color:
-                      activeFilter === 'nearby'
-                        ? Palette.snow
-                        : isDark
-                        ? Palette.snow
-                        : Palette.pineForest,
-                  },
-                ]}
-              >
-                📍 Nearby &lt; 15 km ({nearbyCount})
-              </Text>
-            </Pressable>
-
-            <Pressable
-              style={[
-                styles.filterPill,
-                activeFilter === 'critical' && styles.filterPillActive,
-                {
-                  backgroundColor:
-                    activeFilter === 'critical'
-                      ? Palette.rescueRed
-                      : isDark
-                      ? Palette.surfaceDarkElevated
-                      : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => setActiveFilter('critical')}
-            >
-              <Text
-                style={[
-                  styles.filterPillText,
-                  {
-                    color:
-                      activeFilter === 'critical'
-                        ? Palette.snow
-                        : isDark
-                        ? Palette.snow
-                        : Palette.pineForest,
-                  },
-                ]}
-              >
-                ⚠️ Critical Roadblocks
-              </Text>
-            </Pressable>
-
-            <Pressable
-              style={[
-                styles.filterPill,
-                activeFilter === 'verified' && styles.filterPillActive,
-                {
-                  backgroundColor:
-                    activeFilter === 'verified'
-                      ? Palette.verifiedGreen
-                      : isDark
-                      ? Palette.surfaceDarkElevated
-                      : Palette.snow,
-                  borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                },
-              ]}
-              onPress={() => setActiveFilter('verified')}
-            >
-              <Text
-                style={[
-                  styles.filterPillText,
-                  {
-                    color:
-                      activeFilter === 'verified'
-                        ? Palette.snow
-                        : isDark
-                        ? Palette.snow
-                        : Palette.pineForest,
-                  },
-                ]}
-              >
-                ✓ Community Corroborated
-              </Text>
-            </Pressable>
-          </ScrollView>
-
-          {/* Feed List Items */}
-          {filteredFeed.map((item) => {
-            const hasCorroborated = corroboratedIds[item.id];
-            const isVeryNearby = item.distanceKm <= 5;
-
+        {/* SHIELD-INSPIRED HORIZONTAL CATEGORY PILL TABS */}
+        <NativeScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterScroll}
+        >
+          {filters.map(({ value, label }) => {
+            const selected = activeFilter === value;
             return (
-              <View
-                key={item.id}
+              <Pressable
+                key={value}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+                onPress={() => setActiveFilter(value)}
                 style={[
-                  styles.feedCard,
-                  {
-                    backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                    borderColor: isVeryNearby
-                      ? Palette.saffron
-                      : isDark
-                      ? Palette.surfaceDarkBorder
-                      : Palette.stone,
-                  },
+                  styles.filterPill,
+                  selected
+                    ? { backgroundColor: isDark ? Palette.cobalt : '#0F172A', borderColor: isDark ? Palette.cobalt : '#0F172A' }
+                    : { backgroundColor: isDark ? '#1E293B' : '#FFFFFF', borderColor: isDark ? '#334155' : '#E2E8F0' },
                 ]}
               >
-                {/* Card Author & Proximity Distance Header */}
-                <View style={styles.cardHeader}>
-                  <View style={styles.cardAuthorRow}>
-                    <View
-                      style={[
-                        styles.authorAvatar,
-                        {
-                          backgroundColor:
-                            item.reportedByRole === 'moderator'
-                              ? Palette.pineForestContainer
-                              : Palette.stoneLight,
-                        },
-                      ]}
-                    >
-                      <Text style={styles.authorAvatarText}>
-                        {item.reportedByRole === 'moderator' ? '🛡️' : '🏔️'}
-                      </Text>
-                    </View>
-                    <View>
-                      <Text
-                        style={[
-                          styles.cardAuthorName,
-                          { color: isDark ? Palette.snow : Palette.pineForest },
-                        ]}
-                      >
-                        {item.reportedBy || 'Mountain Resident'}
-                      </Text>
-                      <View style={styles.cardTimeRow}>
-                        <Clock size={11} color={Palette.slateMuted} />
-                        <Text style={styles.cardTimeText}>{item.time || 'Recently'}</Text>
-                        <Text style={styles.cardTimeDot}>•</Text>
-                        <Text style={styles.cardSectorText}>
-                          {item.area || 'Uttarakhand Highway'}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Proximity Distance Tag */}
-                  <View
-                    style={[
-                      styles.distanceBadge,
-                      {
-                        backgroundColor: isVeryNearby
-                          ? '#FEF3C7'
-                          : isDark
-                          ? '#16221A'
-                          : '#DCFCE7',
-                      },
-                    ]}
-                  >
-                    <MapPin
-                      size={11}
-                      color={isVeryNearby ? Palette.saffron : Palette.verifiedGreen}
-                    />
-                    <Text
-                      style={[
-                        styles.distanceBadgeText,
-                        {
-                          color: isVeryNearby ? Palette.saffronMuted : Palette.verifiedGreen,
-                        },
-                      ]}
-                    >
-                      {item.distanceKm} km away
-                    </Text>
-                  </View>
-                </View>
-
-                {/* Badges Row */}
-                <View style={styles.cardBadgesRow}>
-                  <Badge label={item.type} variant="brand" />
-                  <StatusLabel status={item.status} />
-                  <Badge
-                    label={`${item.severity} Risk`}
-                    variant={item.severity === 'High' ? 'danger' : 'warning'}
-                  />
-                </View>
-
-                {/* Location Title & Description */}
-                <Pressable
-                  onPress={() => router.push(`/hazard/${item.id}` as any)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`View full report of ${item.type} at ${item.location}`}
-                >
-                  <Text
-                    style={[
-                      styles.cardLocationTitle,
-                      { color: isDark ? Palette.snow : Palette.pineForest },
-                    ]}
-                  >
-                    {item.location}
-                  </Text>
-
-                  <Text
-                    style={[
-                      styles.cardDescription,
-                      { color: isDark ? Palette.stone : Palette.slate },
-                    ]}
-                  >
-                    {item.description}
-                  </Text>
-                </Pressable>
-
-                {/* Attached Incident Photo */}
-                {item.photo_url ? (
-                  <Pressable
-                    style={styles.cardPhotoWrapper}
-                    onPress={() => router.push(`/hazard/${item.id}` as any)}
-                    accessibilityRole="button"
-                    accessibilityLabel="View full photo and incident details"
-                  >
-                    <Image
-                      source={{ uri: item.photo_url }}
-                      style={styles.cardPhoto}
-                      contentFit="cover"
-                      transition={200}
-                    />
-                    <View style={styles.cardPhotoOverlayBadge}>
-                      <Text style={styles.cardPhotoOverlayText}>📷 Photo Attached • Tap to View</Text>
-                    </View>
-                  </Pressable>
-                ) : null}
-
-                {/* Interactive Action Footer */}
-                <View
-                  style={[
-                    styles.cardFooter,
-                    {
-                      borderTopColor: isDark ? Palette.surfaceDarkBorder : Palette.stoneLight,
-                    },
-                  ]}
-                >
-                  <Pressable
-                    style={[
-                      styles.feedActionBtn,
-                      hasCorroborated && styles.feedActionBtnActive,
-                    ]}
-                    onPress={() => handleCorroborate(item.id)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Corroborate and confirm hazard"
-                  >
-                    <ThumbsUp
-                      size={15}
-                      color={hasCorroborated ? Palette.verifiedGreen : Palette.slateMuted}
-                    />
-                    <Text
-                      style={[
-                        styles.feedActionBtnText,
-                        hasCorroborated && { color: Palette.verifiedGreen, fontWeight: '700' },
-                      ]}
-                    >
-                      {hasCorroborated
-                        ? `Confirmed (${(item.corroborationCount || 1) + 1})`
-                        : `Confirm Status (${item.corroborationCount || 1})`}
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    style={styles.feedActionBtn}
-                    onPress={() => router.push(`/hazard/${item.id}` as any)}
-                    accessibilityRole="button"
-                    accessibilityLabel="View hazard details"
-                  >
-                    <BookOpen size={15} color={isDark ? Palette.snow : Palette.pineForest} />
-                    <Text style={[styles.feedActionBtnText, { color: isDark ? Palette.snow : Palette.pineForest }]}>
-                      Details
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    style={styles.feedActionBtn}
-                    onPress={() => router.push('/map')}
-                    accessibilityRole="button"
-                    accessibilityLabel="View hazard on map"
-                  >
-                    <Navigation size={15} color={Palette.infoBlue} />
-                    <Text style={[styles.feedActionBtnText, { color: Palette.infoBlue }]}>
-                      View Map
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    style={styles.feedActionBtn}
-                    onPress={() => handleShareHazard(item)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Share hazard details"
-                  >
-                    <Share2 size={15} color={Palette.slateMuted} />
-                    <Text style={styles.feedActionBtnText}>Share</Text>
-                  </Pressable>
-                </View>
-              </View>
-            );
-          })}
-
-          {/* Offline Bilingual Safety Guides */}
-          <View style={styles.sectionHeaderRow}>
-            <View style={styles.sectionTitleGroup}>
-              <BookOpen size={18} color={Palette.pineForestMuted} />
-              <Text
-                style={[
-                  styles.sectionTitle,
-                  { color: isDark ? Palette.snow : Palette.pineForest },
-                ]}
-              >
-                {selectedLanguage === 'en'
-                  ? 'Offline Mountain Safety Guides'
-                  : 'पर्वतीय आपदा सुरक्षा निर्देशिका'}
-              </Text>
-            </View>
-          </View>
-
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.guidesScroll}
-            {...(Platform.OS === 'web' ? ({ tabIndex: 0, 'aria-label': 'Offline Mountain Safety Guides' } as any) : {})}
-          >
-            {MOUNTAIN_SAFETY_GUIDES.map((guide) => (
-              <View
-                key={guide.id}
-                style={[
-                  styles.guideCard,
-                  {
-                    backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                    borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
-                  },
-                ]}
-              >
-                <Badge
-                  label={guide.category.replace('_', ' ').toUpperCase()}
-                  variant={guide.severity === 'critical' ? 'danger' : 'warning'}
-                />
                 <Text
                   style={[
-                    styles.guideTitle,
-                    { color: isDark ? Palette.snow : Palette.pineForest },
-                  ]}
-                >
-                  {selectedLanguage === 'en' ? guide.titleEn : guide.titleHi}
-                </Text>
-                <Text style={styles.guideDoItem}>
-                  • {selectedLanguage === 'en' ? guide.dosEn[0] : guide.dosHi[0]}
-                </Text>
-                <Text style={styles.guideTipText}>
-                  Tip: {selectedLanguage === 'en' ? guide.offlineTipEn : guide.offlineTipHi}
-                </Text>
-              </View>
-            ))}
-          </ScrollView>
-
-          {/* Direct Emergency Hotlines */}
-          <View style={styles.hotlineSection}>
-            <Text
-              style={[
-                styles.sectionTitle,
-                { color: isDark ? Palette.snow : Palette.pineForest },
-              ]}
-            >
-              Direct Emergency Hotlines (Immediate Dial)
-            </Text>
-
-            <View style={styles.hotlineGrid}>
-              {UTTARAKHAND_EMERGENCY_DIRECTORY.slice(0, 4).map((c) => (
-                <Pressable
-                  key={c.contactId}
-                  style={[
-                    styles.hotlineCard,
+                    styles.filterPillText,
                     {
-                      backgroundColor: isDark ? Palette.surfaceDarkElevated : Palette.snow,
-                      borderColor: isDark ? Palette.surfaceDarkBorder : Palette.stone,
+                      color: selected
+                        ? '#FFFFFF'
+                        : isDark ? '#CBD5E1' : '#475569',
+                      fontWeight: selected ? '700' : '500',
                     },
                   ]}
-                  onPress={() => Linking.openURL(`tel:${c.phoneNumber}`)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Call ${c.authorityName} at ${c.phoneNumber}`}
-                  {...(Platform.OS === 'web' ? ({ role: 'button' } as any) : {})}
                 >
-                  <PhoneCall size={16} color={Palette.rescueRed} />
-                  <View style={styles.hotlineCardText}>
-                    <Text style={styles.hotlineCardNum}>{c.phoneNumber}</Text>
-                    <Text style={styles.hotlineCardName} numberOfLines={1}>
-                      {c.authorityName}
-                    </Text>
+                  {label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </NativeScrollView>
+
+        {/* SPOTLIGHT HERO INCIDENT CARD */}
+        {featuredHazard && (
+          <View style={styles.spotlightCard}>
+            <Image
+              source={
+                featuredHazard.photo_url
+                  ? { uri: featuredHazard.photo_url }
+                  : require('@/assets/images/garhwal-terrain.webp')
+              }
+              style={styles.spotlightImage}
+              contentFit="cover"
+            />
+            <LinearGradient
+              colors={['rgba(0,0,0,0.2)', 'rgba(11,18,30,0.5)', 'rgba(11,18,30,0.96)']}
+              locations={[0, 0.45, 1]}
+              style={styles.spotlightGradient}
+            >
+              <View style={styles.spotlightTopRow}>
+                <View style={styles.spotlightCategoryBadge}>
+                  <AlertTriangle size={13} color="#FFFFFF" strokeWidth={2.4} />
+                  <Text style={styles.spotlightCategoryText}>{featuredHazard.type.toUpperCase()}</Text>
+                </View>
+                <View style={[
+                  styles.spotlightSeverityBadge,
+                  { backgroundColor: featuredHazard.severity === 'High' ? Palette.rescueRed : Palette.amberGold }
+                ]}>
+                  <Text style={styles.spotlightSeverityText}>
+                    {featuredHazard.severity === 'High' ? 'CRITICAL RISK' : 'MEDIUM RISK'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.spotlightBottom}>
+                <Text style={styles.spotlightLocation} numberOfLines={2}>
+                  {featuredHazard.location}
+                </Text>
+                <Text style={styles.spotlightDesc} numberOfLines={2}>
+                  {featuredHazard.description}
+                </Text>
+
+                <View style={styles.spotlightMetaRow}>
+                  <View style={styles.metaItem}>
+                    <Clock size={12} color="#94A3B8" />
+                    <Text style={styles.metaText}>{featuredHazard.time || 'Live'}</Text>
                   </View>
+                  {featuredHazard.distanceKm != null && (
+                    <View style={styles.metaItem}>
+                      <MapPin size={12} color="#94A3B8" />
+                      <Text style={styles.metaText}>{featuredHazard.distanceKm.toFixed(1)} km away</Text>
+                    </View>
+                  )}
+                  {featuredHazard.area && (
+                    <View style={styles.metaItem}>
+                      <Building2 size={12} color="#94A3B8" />
+                      <Text style={styles.metaText}>{featuredHazard.area}</Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.spotlightActionsBar}>
+                  <View style={styles.spotlightStatsGroup}>
+                    <View style={styles.statPill}>
+                      <Eye size={13} color="#CBD5E1" />
+                      <Text style={styles.statPillText}>18.4K</Text>
+                    </View>
+                    <Pressable
+                      style={styles.statPill}
+                      onPress={() => handleCorroborate(featuredHazard.id)}
+                    >
+                      <ThumbsUp
+                        size={13}
+                        color={corroboratedIds[featuredHazard.id] ? '#4ADE80' : '#CBD5E1'}
+                      />
+                      <Text style={[styles.statPillText, corroboratedIds[featuredHazard.id] && { color: '#4ADE80' }]}>
+                        {(featuredHazard.corroborationCount ?? 0) + (corroboratedIds[featuredHazard.id] ? 1 : 0)}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.statPill}
+                      onPress={() => handleShareHazard(featuredHazard)}
+                    >
+                      <Share2 size={13} color="#CBD5E1" />
+                    </Pressable>
+                  </View>
+
+                  <Link href={{ pathname: '/hazard/[id]', params: { id: featuredHazard.id } }} asChild>
+                    <Pressable style={styles.spotlightViewBtn}>
+                      <Text style={styles.spotlightViewBtnText}>View Details</Text>
+                      <ChevronRight size={14} color="#FFFFFF" />
+                    </Pressable>
+                  </Link>
+                </View>
+              </View>
+            </LinearGradient>
+          </View>
+        )}
+
+        {/* SHIELD-INSPIRED: VERIFIED REPORTS AND SAFETY UPDATES 2-COLUMN GRID */}
+        <View style={styles.verifiedSection}>
+          <View style={styles.verifiedHeader}>
+            <Text style={[styles.verifiedTitle, { color: theme.textPrimary }]}>
+              Verified Reports, and Safety Updates
+            </Text>
+            <Text style={[styles.verifiedSub, { color: theme.textSecondary }]}>
+              Official Uttarakhand DDMA & BRO road status
+            </Text>
+          </View>
+
+          <View style={styles.verifiedGrid}>
+            <Pressable
+              style={styles.verifiedCard}
+              onPress={() => setActiveFilter('landslide')}
+            >
+              <LinearGradient
+                colors={['rgba(234, 88, 12, 0.45)', 'rgba(15, 23, 42, 0.95)']}
+                style={styles.verifiedCardGrad}
+              >
+                <View style={[styles.verifiedBadge, { backgroundColor: '#EA580C' }]}>
+                  <AlertTriangle size={11} color="#FFFFFF" />
+                  <Text style={styles.verifiedBadgeText}>Rockfall</Text>
+                </View>
+                <View style={styles.verifiedCardBottom}>
+                  <Text style={styles.verifiedCardTitle}>Active Rockfall</Text>
+                  <Text style={styles.verifiedCardMeta}>NH-07 Helang Pass</Text>
+                </View>
+              </LinearGradient>
+            </Pressable>
+
+            <Pressable
+              style={styles.verifiedCard}
+              onPress={() => setActiveFilter('weather')}
+            >
+              <LinearGradient
+                colors={['rgba(2, 132, 199, 0.45)', 'rgba(15, 23, 42, 0.95)']}
+                style={styles.verifiedCardGrad}
+              >
+                <View style={[styles.verifiedBadge, { backgroundColor: '#0284C7' }]}>
+                  <Radio size={11} color="#FFFFFF" />
+                  <Text style={styles.verifiedBadgeText}>Weather</Text>
+                </View>
+                <View style={styles.verifiedCardBottom}>
+                  <Text style={styles.verifiedCardTitle}>Heavy Rain Warning</Text>
+                  <Text style={styles.verifiedCardMeta}>Chamoli High Passes</Text>
+                </View>
+              </LinearGradient>
+            </Pressable>
+
+            <Link href="/control-room" asChild>
+              <Pressable style={styles.verifiedCard}>
+                <LinearGradient
+                  colors={['rgba(16, 185, 129, 0.45)', 'rgba(15, 23, 42, 0.95)']}
+                  style={styles.verifiedCardGrad}
+                >
+                  <View style={[styles.verifiedBadge, { backgroundColor: '#10B981' }]}>
+                    <ShieldCheck size={11} color="#FFFFFF" />
+                    <Text style={styles.verifiedBadgeText}>BRO Units</Text>
+                  </View>
+                  <View style={styles.verifiedCardBottom}>
+                    <Text style={styles.verifiedCardTitle}>Clearance Units</Text>
+                    <Text style={styles.verifiedCardMeta}>Bulldozers Active</Text>
+                  </View>
+                </LinearGradient>
+              </Pressable>
+            </Link>
+
+            <Link href="/community" asChild>
+              <Pressable style={styles.verifiedCard}>
+                <LinearGradient
+                  colors={['rgba(99, 102, 241, 0.45)', 'rgba(15, 23, 42, 0.95)']}
+                  style={styles.verifiedCardGrad}
+                >
+                  <View style={[styles.verifiedBadge, { backgroundColor: '#6366F1' }]}>
+                    <Building2 size={11} color="#FFFFFF" />
+                    <Text style={styles.verifiedBadgeText}>Shelters</Text>
+                  </View>
+                  <View style={styles.verifiedCardBottom}>
+                    <Text style={styles.verifiedCardTitle}>Relief Shelters</Text>
+                    <Text style={styles.verifiedCardMeta}>Joshimath & Helang</Text>
+                  </View>
+                </LinearGradient>
+              </Pressable>
+            </Link>
+          </View>
+        </View>
+
+        {/* OFFLINE QUEUE NOTICE */}
+        {queueCount > 0 && (
+          <View style={[styles.queue, cardStyle]}>
+            <View style={styles.flex}>
+              <Text style={[styles.actionTitle, { color: theme.textPrimary }]}>{queueCount} pending {queueCount === 1 ? 'report' : 'reports'}</Text>
+              <Text style={[styles.small, { color: theme.textSecondary }]}>Saved on this device and waiting to sync.</Text>
+            </View>
+            <Pressable accessibilityRole="button" onPress={handleSyncQueue} disabled={syncing} style={styles.utilityButton}>
+              <Text style={[styles.linkText, { color: Palette.cobalt }]}>{syncing ? 'Syncing…' : 'Sync now'}</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {!twoColumns && actionPanel}
+
+        {/* FEED LIST FOR ALL REPORTS */}
+        <View style={[styles.lower, twoColumns && styles.lowerWide]}>
+          <View style={[styles.feed, { minWidth: 0 }]}>
+            <View style={styles.sectionHeading}>
+              <View style={styles.flex}>
+                <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.textPrimary }]}>Live Mountain Reports</Text>
+                <Text style={[styles.small, { color: theme.textSecondary }]}>Real-time citizen & authority updates</Text>
+              </View>
+              <Pressable accessibilityRole="button" accessibilityLabel="Refresh incident reports" onPress={handleRefresh}
+                accessibilityState={{ busy: refreshing }} disabled={refreshing} style={[styles.iconButton, cardStyle]}>
+                {refreshing ? <ActivityIndicator size="small" color={Palette.cobalt} /> : <RefreshCw size={16} color={Palette.cobalt} />}
+              </Pressable>
+            </View>
+
+            {(refreshError || isConnected === false || filteredFeed.some((item) => item.fromCache)) && (
+              <View style={[styles.feedNotice, { backgroundColor: isDark ? '#1E293B' : '#EFF6FF' }]} accessibilityLiveRegion="polite">
+                <WifiOff size={16} color={Palette.cobalt} />
+                <Text style={[styles.small, styles.flex, { color: theme.textPrimary }]}>
+                  {refreshError ? 'Could not refresh reports. Try again.' : 'Saved reports may be out of date.'}
+                </Text>
+              </View>
+            )}
+
+            {filteredFeed.length === 0 && (
+              <View style={[styles.empty, cardStyle]}>
+                <AlertTriangle size={25} color={theme.textTertiary} />
+                <Text style={[styles.actionTitle, { color: theme.textPrimary }]}>No reports for this view</Text>
+                <Text style={[styles.small, { color: theme.textSecondary }]}>Change the filter or refresh for updates.</Text>
+              </View>
+            )}
+
+            {secondaryHazards.length > 0 && (
+              <View style={styles.feedCardsContainer}>
+                {secondaryHazards.map((item) => {
+                  const demo = isDemoHazard(item);
+                  const confirmed = corroboratedIds[item.id];
+                  const severityColor = item.severity === 'High' ? Palette.rescueRed : item.severity === 'Medium' ? Palette.amberGold : Palette.verifiedGreen;
+                  const locationText = item.distanceKm == null ? '' : `${item.distanceKm.toFixed(1)} km away`;
+
+                  return (
+                    <View key={item.id} style={[styles.modernFeedCard, { backgroundColor: isDark ? '#111827' : '#FFFFFF', borderColor: isDark ? '#1F2937' : '#E2E8F0' }]}>
+                      <View style={styles.feedCardTop}>
+                        <View style={styles.feedBadgesRow}>
+                          <View style={[styles.categoryBadge, { backgroundColor: isDark ? '#1E293B' : '#F1F5F9' }]}>
+                            <Text style={[styles.categoryBadgeText, { color: isDark ? '#93C5FD' : Palette.cobalt }]}>{item.type}</Text>
+                          </View>
+                          <View style={[styles.severityBadge, { backgroundColor: item.severity === 'High' ? '#FEE2E2' : '#FEF3C7' }]}>
+                            <Text style={[styles.severityBadgeText, { color: severityColor }]}>{item.severity} Risk</Text>
+                          </View>
+                          {!demo && <StatusLabel status={item.status} />}
+                        </View>
+                        {item.time && (
+                          <Text style={[styles.feedCardTime, { color: theme.textTertiary }]}>{item.time}</Text>
+                        )}
+                      </View>
+
+                      <Link href={{ pathname: '/hazard/[id]', params: { id: item.id } }} asChild>
+                        <Pressable style={styles.feedCardContentLink}>
+                          <Text style={[styles.feedCardTitle, { color: theme.textPrimary }]}>{item.location}</Text>
+                          <Text style={[styles.feedCardDesc, { color: theme.textSecondary }]} numberOfLines={2}>{item.description}</Text>
+                        </Pressable>
+                      </Link>
+
+                      {item.photo_url && (
+                        <Link href={{ pathname: '/hazard/[id]', params: { id: item.id } }} asChild>
+                          <Pressable style={styles.feedCardPhotoWrap}>
+                            <Image source={{ uri: item.photo_url }} contentFit="cover" style={styles.feedCardPhoto} />
+                          </Pressable>
+                        </Link>
+                      )}
+
+                      <View style={styles.feedCardFooter}>
+                        <View style={styles.feedCardMeta}>
+                          {item.area && (
+                            <View style={styles.metaItem}>
+                              <MapPin size={12} color={theme.textTertiary} />
+                              <Text style={[styles.metaText, { color: theme.textSecondary }]}>{item.area}</Text>
+                            </View>
+                          )}
+                          {locationText ? (
+                            <Text style={[styles.metaText, { color: Palette.cobalt, fontWeight: '600' }]}>{locationText}</Text>
+                          ) : null}
+                        </View>
+
+                        <View style={styles.feedCardActions}>
+                          {!demo && (
+                            <Pressable
+                              style={[styles.feedActionBtn, confirmed && { backgroundColor: isDark ? '#064E3B' : '#DCFCE7' }]}
+                              onPress={() => handleCorroborate(item.id)}
+                            >
+                              <ThumbsUp size={14} color={confirmed ? Palette.verifiedGreen : theme.textSecondary} />
+                              <Text style={[styles.feedActionBtnText, { color: confirmed ? Palette.verifiedGreen : theme.textSecondary }]}>
+                                {(item.corroborationCount ?? 0) + (confirmed ? 1 : 0)}
+                              </Text>
+                            </Pressable>
+                          )}
+                          <Pressable style={styles.feedActionBtn} onPress={() => handleShareHazard(item)}>
+                            <Share2 size={14} color={theme.textSecondary} />
+                          </Pressable>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+
+          {/* SIDEBAR RAIL FOR WIDE / DESKTOP SCREENS */}
+          <View style={[styles.rail, twoColumns && styles.railWide]}>
+            {twoColumns && actionPanel}
+            <View style={[styles.panel, cardStyle]}>
+              <View style={[styles.panelHeader, { borderColor: theme.border }]}>
+                <Phone size={17} color={theme.error} />
+                <Text accessibilityRole="header" style={[styles.panelTitle, { color: theme.textPrimary }]}>Emergency contacts</Text>
+              </View>
+              {UTTARAKHAND_EMERGENCY_DIRECTORY.slice(0, 4).map((contact) => (
+                <Pressable key={contact.contactId} accessibilityRole="button"
+                  accessibilityLabel={`Call ${contact.authorityName} at ${contact.phoneNumber}`}
+                  onPress={() => Linking.openURL(`tel:${contact.phoneNumber}`)}
+                  style={[styles.panelRow, { borderColor: theme.border }]}>
+                  <View style={styles.flex}>
+                    <Text style={[styles.contactName, { color: theme.textSecondary }]}>{contact.authorityName.replace(/\s*\(\d+\)$/, '')}</Text>
+                    <Text style={[styles.contactNumber, { color: theme.textPrimary }]}>{contact.phoneNumber}</Text>
+                  </View>
+                  <ArrowUpRight size={16} color={theme.textTertiary} />
                 </Pressable>
               ))}
             </View>
+            <View style={[styles.panel, cardStyle]}>
+              <View style={[styles.panelHeader, { borderColor: theme.border }]}>
+                <Radio size={17} color={Palette.cobalt} />
+                <Text accessibilityRole="header" style={[styles.panelTitle, { color: theme.textPrimary }]}>Response resources</Text>
+              </View>
+              {resources.map(({ title, href, icon: Icon }) => (
+                <Link key={href} href={href as Href} asChild>
+                  <Pressable accessibilityRole="link" style={StyleSheet.flatten([styles.panelRow, { borderColor: theme.border }])}>
+                    <Icon size={17} color={Palette.cobalt} />
+                    <Text style={[styles.contactName, styles.flex, { color: theme.textPrimary }]}>{title}</Text>
+                    <ChevronRight size={16} color={theme.textTertiary} />
+                  </Pressable>
+                </Link>
+              ))}
+            </View>
+            {__DEV__ && (
+              <Pressable accessibilityRole="button" onPress={handleSimulateRemoteUpload} style={styles.utilityButton}>
+                <Text style={[styles.small, { color: theme.textSecondary }]}>Test a demo proximity alert</Text>
+              </Pressable>
+            )}
           </View>
-        </ScrollView>
-      </View>
+        </View>
+      </ScrollView>
 
-      {/* Persistent 5-Tab Navigation Bar */}
+      {/* FLOATING MODERN DOCK */}
       <BottomNavigation />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-  },
-  header: {
+  screen: { flex: 1 },
+  flex: { flex: 1, minWidth: 0 },
+  header: { borderBottomWidth: 1 },
+  headerInner: {
+    width: '100%',
+    maxWidth: 1376,
+    alignSelf: 'center',
+    minHeight: 64,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.screenPadding,
-    paddingVertical: Spacing.md,
-    borderBottomWidth: 1,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
   },
-  brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  brandLogoCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: Palette.pineForest,
+  headerBrand: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  shieldBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: Palette.cobalt,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: Spacing.sm,
-  },
-  brandTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.subheading,
-    letterSpacing: 1.2,
-  },
-  communitySubhead: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    marginTop: 2,
-  },
-  communityText: {
-    fontFamily: Typography.fontFamily.medium,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.pineForestMuted,
-  },
-  headerControls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-  },
-  langToggle: {
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 5,
-    borderRadius: Radii.sm,
-    backgroundColor: Palette.stoneLight,
-  },
-  langText: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.pineForest,
-  },
-  mainContainer: {
-    flex: 1,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: Spacing.screenPadding,
-    paddingBottom: Spacing.xxl,
-  },
-
-  /* Notification Toast */
-  notificationToast: {
-    position: 'absolute',
-    top: 60,
-    left: 12,
-    right: 12,
-    zIndex: 9999,
-    borderRadius: Radii.lg,
-    borderWidth: 1.5,
-    padding: Spacing.md,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.25,
-    shadowRadius: 10,
-    elevation: 10,
-  },
-  notifIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: Palette.rescueRed,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: Spacing.sm,
-    marginTop: 2,
-  },
-  notifTextGroup: {
-    flex: 1,
-  },
-  notifHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  notifPill: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: 10,
-    color: Palette.rescueRed,
-    letterSpacing: 0.8,
-  },
-  notifTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.bodyMd,
-    marginBottom: 2,
-  },
-  notifDesc: {
-    fontFamily: Typography.fontFamily.regular,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.slateMuted,
-    lineHeight: 16,
-  },
-  notifActionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: Spacing.xs,
-    gap: Spacing.sm,
-  },
-  notifActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: Palette.rescueRed,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 5,
-    borderRadius: Radii.xs,
-  },
-  notifActionBtnText: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: 11,
-    color: Palette.snow,
-  },
-
-  /* SOS Banner */
-  sosEmergencyBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: Palette.rescueRed,
-    borderRadius: Radii.lg,
-    padding: Spacing.md,
-    marginVertical: Spacing.sm,
-    shadowColor: Palette.rescueRed,
-    shadowOffset: { width: 0, height: 3 },
+    shadowColor: Palette.cobalt,
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 5,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  sosBannerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  sosPulseIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#7D0008',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: Spacing.md,
-  },
-  sosBannerTextGroup: {
-    flex: 1,
-  },
-  sosBannerTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.bodyLg,
-    color: Palette.snow,
-  },
-  sosBannerSub: {
-    fontFamily: Typography.fontFamily.medium,
-    fontSize: Typography.fontSize.caption,
-    color: '#FFFFFF',
-    marginTop: 2,
-  },
+  headerBrandTitle: { fontSize: 16, fontWeight: '900', letterSpacing: 0.6 },
+  headerBrandSub: { fontSize: 11, fontWeight: '500' },
+  controls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  headerLocation: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRightWidth: 1, paddingRight: 12, marginRight: 4 },
+  networkPill: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 30, borderRadius: 15, paddingHorizontal: 9 },
+  networkText: { fontSize: 11, fontWeight: '600' },
+  avatarBtn: { position: 'relative', width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  avatarInner: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#CBD5E1' },
+  avatarOnlineDot: { position: 'absolute', bottom: 1, right: 1, width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981', borderWidth: 1.5, borderColor: '#FFFFFF' },
+  iconButton: { width: 38, height: 38, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  content: { width: '100%', maxWidth: 1376, alignSelf: 'center', padding: 16, paddingBottom: 110, gap: 18 },
+  desktopGutter: { paddingHorizontal: 32, paddingTop: 24, gap: 24 },
 
-  /* Action Grid */
-  actionGrid: {
+  // Headline
+  headlineSection: { paddingTop: 4, paddingBottom: 2 },
+  headlineMain: { fontSize: 26, fontWeight: '800', letterSpacing: -0.6, lineHeight: 34 },
+
+  // Ticker Banner
+  tickerBanner: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginVertical: Spacing.xs,
-  },
-  actionTile: {
-    width: '48.5%',
-    borderRadius: Radii.md,
-    padding: Spacing.md,
+    alignItems: 'center',
+    borderRadius: 9999,
     borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    gap: 10,
   },
-  tileIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  tickerIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#FEF3C7',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: Spacing.xs,
   },
-  tileTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.bodyMd,
-    marginTop: 2,
+  tickerContent: { flex: 1, minWidth: 0 },
+  tickerTitle: { fontSize: 12, fontWeight: '700' },
+  tickerLiveSub: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 1 },
+  tickerPulseDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: Palette.rescueRed },
+  tickerSubText: { fontSize: 10, fontWeight: '600' },
+  tickerActionBtn: {
+    backgroundColor: Palette.cobalt,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 9999,
   },
-  tileSub: {
-    fontFamily: Typography.fontFamily.regular,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.slateMuted,
-    marginTop: 2,
-  },
+  tickerActionText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700' },
 
-  /* Proximity Simulation Demo Card */
-  demoCard: {
-    borderRadius: Radii.md,
-    borderWidth: 1,
-    padding: Spacing.md,
-    marginVertical: Spacing.sm,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  demoCardLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    marginRight: Spacing.sm,
-  },
-  demoBadgeCircle: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#DCFCE7',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: Spacing.sm,
-  },
-  demoCardText: {
-    flex: 1,
-  },
-  demoCardTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.caption,
-  },
-  demoCardSub: {
-    fontFamily: Typography.fontFamily.regular,
-    fontSize: 10,
-    color: Palette.slateMuted,
-    marginTop: 2,
-  },
-  demoTestBtn: {
-    backgroundColor: Palette.pineForest,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 7,
-    borderRadius: Radii.sm,
-  },
-  demoTestBtnText: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: 11,
-    color: Palette.snow,
-  },
-
-  /* Feed Header & Filters */
-  feedHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: Spacing.md,
-    marginBottom: Spacing.xs,
-  },
-  feedSectionTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.subheading,
-  },
-  feedSectionSub: {
-    fontFamily: Typography.fontFamily.medium,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.pineForestMuted,
-    marginTop: 1,
-  },
-  postHazardBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: Palette.rescueRed,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 6,
-    borderRadius: Radii.sm,
-  },
-  postHazardBtnText: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.snow,
-  },
-  filterPillsScroll: {
-    marginVertical: Spacing.sm,
-  },
+  // Filter Pills Scroll
+  filterScroll: { flexDirection: 'row', gap: 8, paddingVertical: 2 },
   filterPill: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 6,
-    borderRadius: Radii.full,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 9999,
     borderWidth: 1,
-    marginRight: Spacing.xs,
   },
-  filterPillActive: {
-    borderColor: 'transparent',
-  },
-  filterPillText: {
-    fontFamily: Typography.fontFamily.semibold,
-    fontSize: Typography.fontSize.caption,
-  },
+  filterPillText: { fontSize: 12 },
 
-  /* Feed Cards */
-  feedCard: {
-    borderRadius: Radii.lg,
-    padding: Spacing.md,
-    borderWidth: 1,
-    marginBottom: Spacing.md,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    marginBottom: Spacing.sm,
-  },
-  cardAuthorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  authorAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: Spacing.xs,
-  },
-  authorAvatarText: {
-    fontSize: 16,
-  },
-  cardAuthorName: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.caption,
-  },
-  cardTimeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    marginTop: 2,
-  },
-  cardTimeText: {
-    fontFamily: Typography.fontFamily.regular,
-    fontSize: 10,
-    color: Palette.slateMuted,
-  },
-  cardTimeDot: {
-    fontSize: 10,
-    color: Palette.slateMuted,
-  },
-  cardSectorText: {
-    fontFamily: Typography.fontFamily.medium,
-    fontSize: 10,
-    color: Palette.pineForestMuted,
-  },
-  distanceBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: Radii.full,
-  },
-  distanceBadgeText: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: 10,
-  },
-  cardBadgesRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: Spacing.xs,
-    marginBottom: Spacing.xs,
-  },
-  cardLocationTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.bodyMd,
-    lineHeight: 20,
-    marginBottom: 4,
-  },
-  cardDescription: {
-    fontFamily: Typography.fontFamily.regular,
-    fontSize: Typography.fontSize.bodySm,
-    lineHeight: 18,
-    marginBottom: Spacing.sm,
-  },
-  cardPhotoWrapper: {
-    borderRadius: Radii.md,
+  // Spotlight Hero Card
+  spotlightCard: {
+    width: '100%',
+    height: 350,
+    borderRadius: Radii.cardLg,
     overflow: 'hidden',
-    marginVertical: Spacing.xs,
     position: 'relative',
-    height: 180,
-    backgroundColor: '#00000015',
+    backgroundColor: '#0F172A',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    elevation: 8,
   },
-  cardPhoto: {
+  spotlightImage: { width: '100%', height: '100%', position: 'absolute' },
+  spotlightGradient: {
     width: '100%',
     height: '100%',
+    justifyContent: 'space-between',
+    padding: 20,
   },
-  cardPhotoOverlayBadge: {
-    position: 'absolute',
-    bottom: 8,
-    right: 8,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: Radii.sm,
-  },
-  cardPhotoOverlayText: {
-    fontFamily: Typography.fontFamily.medium,
-    fontSize: 10,
-    color: Palette.snow,
-  },
-  cardFooter: {
+  spotlightTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderTopWidth: 1,
-    paddingTop: Spacing.sm,
-    marginTop: Spacing.xs,
   },
-  feedActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 4,
-    paddingHorizontal: 6,
-  },
-  feedActionBtnActive: {
-    backgroundColor: '#DCFCE7',
-    borderRadius: Radii.xs,
-  },
-  feedActionBtnText: {
-    fontFamily: Typography.fontFamily.semibold,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.slateMuted,
-  },
-
-  /* Section Headers */
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: Spacing.md,
-    marginBottom: Spacing.xs,
-  },
-  sectionTitleGroup: {
+  spotlightCategoryBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-  },
-  sectionTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.subheading,
-  },
-  guidesScroll: {
-    flexDirection: 'row',
-    marginVertical: Spacing.xs,
-  },
-  guideCard: {
-    width: 260,
-    borderRadius: Radii.md,
-    padding: Spacing.md,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 9999,
     borderWidth: 1,
-    marginRight: Spacing.sm,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
   },
-  guideTitle: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.bodyMd,
-    marginVertical: Spacing.xs,
+  spotlightCategoryText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  spotlightSeverityBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 9999,
   },
-  guideDoItem: {
-    fontFamily: Typography.fontFamily.regular,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.slate,
-    lineHeight: 16,
-    marginBottom: Spacing.xs,
-  },
-  guideTipText: {
-    fontFamily: Typography.fontFamily.semibold,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.pineForestMuted,
-    marginTop: 4,
-  },
-
-  /* Hotlines */
-  hotlineSection: {
-    marginTop: Spacing.md,
-  },
-  hotlineGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginTop: Spacing.sm,
-  },
-  hotlineCard: {
-    width: '48.5%',
+  spotlightSeverityText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+  spotlightBottom: { gap: 6 },
+  spotlightLocation: { color: '#FFFFFF', fontSize: 20, fontWeight: '800', letterSpacing: -0.3, lineHeight: 26 },
+  spotlightDesc: { color: '#E2E8F0', fontSize: 13, lineHeight: 18 },
+  spotlightMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 4 },
+  metaItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  metaText: { color: '#94A3B8', fontSize: 11 },
+  spotlightActionsBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: Spacing.sm,
-    borderRadius: Radii.md,
-    borderWidth: 1,
-    gap: Spacing.xs,
+    justifyContent: 'space-between',
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.15)',
+    marginTop: 6,
   },
-  hotlineCardText: {
+  spotlightStatsGroup: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  statPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 9999,
+  },
+  statPillText: { color: '#FFFFFF', fontSize: 11, fontWeight: '600' },
+  spotlightViewBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: Palette.cobalt,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 9999,
+  },
+  spotlightViewBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+
+  // Verified 2-Column Grid
+  verifiedSection: { gap: 10 },
+  verifiedHeader: { gap: 2 },
+  verifiedTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
+  verifiedSub: { fontSize: 12 },
+  verifiedGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  verifiedCard: {
     flex: 1,
+    minWidth: '47%',
+    height: 110,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: '#0F172A',
   },
-  hotlineCardNum: {
-    fontFamily: Typography.fontFamily.bold,
-    fontSize: Typography.fontSize.bodyMd,
-    color: Palette.rescueRed,
+  verifiedCardGrad: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'space-between',
+    padding: 12,
   },
-  hotlineCardName: {
-    fontFamily: Typography.fontFamily.medium,
-    fontSize: Typography.fontSize.caption,
-    color: Palette.slateMuted,
+  verifiedBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 9999,
   },
+  verifiedBadgeText: { color: '#FFFFFF', fontSize: 9, fontWeight: '800' },
+  verifiedCardBottom: { gap: 2 },
+  verifiedCardTitle: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
+  verifiedCardMeta: { color: '#94A3B8', fontSize: 10 },
+
+  // Modern Feed Cards
+  feedCardsContainer: { gap: 12 },
+  modernFeedCard: {
+    borderRadius: 20,
+    borderWidth: 1,
+    padding: 16,
+    gap: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  feedCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  feedBadgesRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  categoryBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 9999 },
+  categoryBadgeText: { fontSize: 11, fontWeight: '700' },
+  severityBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 9999 },
+  severityBadgeText: { fontSize: 10, fontWeight: '800' },
+  feedCardTime: { fontSize: 11 },
+  feedCardContentLink: { gap: 4 },
+  feedCardTitle: { fontSize: 15, fontWeight: '800' },
+  feedCardDesc: { fontSize: 13, lineHeight: 18 },
+  feedCardPhotoWrap: { borderRadius: 14, overflow: 'hidden', marginTop: 4 },
+  feedCardPhoto: { width: '100%', height: 160 },
+  feedCardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    marginTop: 2,
+  },
+  feedCardMeta: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  feedCardActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  feedActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 9999,
+  },
+  feedActionBtnText: { fontSize: 11, fontWeight: '700' },
+
+  // Panels & Standard
+  notification: { minHeight: 64, borderWidth: 1, borderLeftWidth: 4, borderRadius: 8, padding: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  queue: { minHeight: 64, borderWidth: 1, borderRadius: 8, padding: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  panel: { borderWidth: 1, borderRadius: 18, overflow: 'hidden' },
+  panelHeader: { minHeight: 46, borderBottomWidth: 1, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 14 },
+  panelTitle: { fontSize: 14, fontWeight: '800' },
+  actionsGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  actionCell: { width: '50%', minHeight: 60, paddingHorizontal: 12, paddingVertical: 10 },
+  panelRow: { minHeight: 52, borderBottomWidth: 1, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 10 },
+  actionTitle: { fontSize: 13, fontWeight: '700' },
+  small: { fontSize: 12, lineHeight: 16 },
+  linkText: { fontSize: 12, fontWeight: '700' },
+  utilityButton: { minHeight: 38, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center' },
+  lower: { gap: 18 },
+  lowerWide: { flexDirection: 'row', alignItems: 'flex-start' },
+  feed: { flex: 1, gap: 12 },
+  sectionHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  sectionTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
+  feedNotice: { minHeight: 44, borderRadius: 10, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  empty: { minHeight: 120, borderRadius: 16, borderWidth: 1, alignItems: 'center', justifyContent: 'center', padding: 20, gap: 4 },
+  rail: { width: '100%', gap: 16 },
+  railWide: { width: 330, flexShrink: 0 },
+  contactName: { fontSize: 13, fontWeight: '700' },
+  contactNumber: { fontSize: 12, fontWeight: '500' },
 });

@@ -1,53 +1,53 @@
-/**
- * PahaadSaathi Brand Design Tokens
- * Mountain-inspired, high-contrast, accessible emergency palette
- */
-
+// Slate surfaces support the workspace. Clay marks primary actions and red signals emergencies.
 export const Palette = {
-  // Brand & Mountain Identity
-  alpineInk: '#002116',
-  pineForest: '#003425',
-  pineForestLight: '#174B3A',
-  pineForestMuted: '#165B3E', // High contrast (6.2:1 against white)
-  pineForestContainer: '#AEF1CE',
-
-  // Surfaces & Backgrounds
-  glacier: '#F2FCF2',
-  glacierDark: '#E6F1E7',
-  snow: '#FFFFFF',
-  surfaceDark: '#0B130E',
-  surfaceDarkElevated: '#151E18',
-  surfaceDarkBorder: '#233127',
-
-  // Neutrals & Slate
-  slate: '#2D3732', // Enhanced dark slate for WCAG AA compliance
-  slateMuted: '#454F49', // High contrast neutral (6.8:1 against white)
-  slateBorder: '#C0C9C3',
-  stone: '#DDE5DF',
-  stoneLight: '#EDF5EF',
-
-  // Critical Emergency & Warning
-  rescueRed: '#9B1010', // Deep accessible red (7.5:1 against white)
-  rescueRedLight: '#FFDAD6',
-  rescueRedContainer: '#7D0008',
-  saffron: '#B45309',
-  saffronLight: '#FEF3C7',
-  saffronMuted: '#78350F', // High contrast on yellow (7.2:1 against #FEF3C7)
-
-  // Status & Telemetry
-  verifiedGreen: '#14532D', // Deep accessible green (6.5:1 against #DCFCE7)
-  verifiedGreenLight: '#DCFCE7',
-  infoBlue: '#1E40AF', // Deep accessible blue (6.2:1 against #DBEAFE)
-  infoBlueLight: '#DBEAFE',
+  navyInk: '#0B1829',
+  navy: '#172C46',
+  navyElevated: '#213B58',
+  navyMuted: '#3F5877',
+  navyTint: '#DCE8F4',
+  canvas: '#F8FAFC',
+  clay: '#B45309',
+  clayPressed: '#92400E',
+  clayTint: '#FFFBEB',
+  canvasSecondary: '#E8EEF5',
+  white: '#FFFFFF',
+  canvasDark: '#101B2A',
+  panelDark: '#172437',
+  lineDark: '#334459',
+  slate: '#475569',
+  slateMuted: '#546982',
+  lineStrong: '#ACBACB',
+  line: '#E2E8F0',
+  subtle: '#EDF2F8',
+  rescueRed: '#B4232D',
+  rescueRedLight: '#FCE7E9',
+  rescueRedContainer: '#821922',
+  saffron: '#9A520B',
+  saffronLight: '#FFF1D5',
+  saffronMuted: '#773C07',
+  verifiedGreen: '#176448',
+  verifiedGreenLight: '#E3F2E9',
+  infoBlue: '#245B9E',
+  infoBlueLight: '#E4EEF9',
+  cobalt: '#2563EB',
+  cobaltLight: '#EFF6FF',
+  cobaltDark: '#1D4ED8',
+  terracotta: '#E15B2D',
+  terracottaLight: '#FFF7ED',
+  amberGold: '#F59E0B',
+  amberGoldLight: '#FEF3C7',
+  warmCream: '#FBF9F5',
+  cardDarkOverlay: 'rgba(11, 18, 30, 0.88)',
 };
 
 export const Typography = {
   fontFamily: {
-    regular: 'System',
-    medium: 'System',
-    semibold: 'System',
-    bold: 'System',
-    mono: 'Courier',
+    display: 'BricolageGrotesque_700Bold',
+    regular: 'Inter_400Regular',
+    medium: 'Inter_500Medium',
+    semibold: 'Inter_500Medium',
+    bold: 'Inter_500Medium',
+    mono: 'Inter_500Medium',
   },
   fontSize: {
     caption: 11,
@@ -97,10 +97,13 @@ export const Spacing = {
 
 export const Radii = {
   xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 24,
+  sm: 6,
+  md: 6,
+  lg: 8,
+  xl: 12,
+  card: 22,
+  cardLg: 28,
+  dock: 40,
   full: 9999,
 };
 
